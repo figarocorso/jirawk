@@ -70,7 +70,7 @@ brews:
       email: figarocorso@users.noreply.github.com
     directory: Formula
     dependencies:
-      - name: ankitpokhrel/jira-cli/jira-cli
+      - name: jira-cli
     install: |
       bin.install "jirawk"
     test: |
