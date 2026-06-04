@@ -55,7 +55,7 @@ changelog:
       - Merge pull request
       - Merge branch
 
-brews:
+homebrew_casks:
   - name: jirawk
     repository:
       owner: figarocorso
@@ -68,13 +68,17 @@ brews:
     commit_author:
       name: figarocorso
       email: figarocorso@users.noreply.github.com
-    directory: Formula
+    directory: Casks
     dependencies:
-      - name: jira-cli
-    install: |
-      bin.install "jirawk"
-    test: |
-      system "#{bin}/jirawk", "--help"
+      - formula: jira-cli
+    # Strip the macOS quarantine attribute so the unsigned binary runs without a
+    # Gatekeeper prompt after `brew install`.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/jirawk"]
+          end
 
 release:
   draft: false

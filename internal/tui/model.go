@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/figarocorso/jirawk/internal/config"
 	"github.com/figarocorso/jirawk/internal/jira"
+	"github.com/mattn/go-runewidth"
 )
 
 type autoRefreshTickMsg time.Time
@@ -29,6 +30,19 @@ var (
 	tabActive    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("212")).Padding(0, 1)
 	tabInactive  = lipgloss.NewStyle().Faint(true).Padding(0, 1)
 	tabSeparator = lipgloss.NewStyle().Faint(true)
+
+	// Shared table styles, used both to seed the bubbles table (cursor/layout
+	// state) and by renderColoredTable, which draws the rows itself so it can
+	// colorize each row by age without bubbles' runewidth.Truncate corrupting
+	// embedded ANSI (the reason age-coloring was previously deferred).
+	tblHeaderStyle = lipgloss.NewStyle().
+			Bold(true).
+			Padding(0, 1).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("212")).
+			BorderTop(false).BorderLeft(false).BorderRight(false).BorderBottom(true)
+	tblCellStyle     = lipgloss.NewStyle().Padding(0, 1)
+	tblSelectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
 )
 
 // statusEmojiLabel returns an emoji-prefixed status name (no ANSI, so the
@@ -73,6 +87,7 @@ type tab struct {
 	ageDesc string // header label for the Age column (carries the sort arrow)
 	table   table.Model
 	rows    []jira.Issue
+	offset  int // first visible row index for the custom colored renderer
 }
 
 // Model is the Bubble Tea state for jirawk's tabbed TUI.
@@ -90,7 +105,18 @@ type Model struct {
 
 	refreshInterval time.Duration
 	overlay         string
+
+	// palette is the prowl-style slash-command line (e.g. "/usage").
+	palette      bool
+	paletteInput string
+
+	// confirmDone gates the in-progress → Done transition behind a y/N prompt.
+	confirmDone bool
+	pendingDone jira.Issue
 }
+
+// doneState is the target status name used when transitioning an issue to Done.
+const doneState = "Done"
 
 // SetRefreshInterval enables watch-style auto-refresh. Non-positive disables it.
 func (m *Model) SetRefreshInterval(d time.Duration) {
@@ -136,9 +162,12 @@ func New(cfg *config.Config, client jira.Client) *Model {
 		title   string
 		ageDesc string
 	}{
+		// Arrow marks the sort direction so each tab shows why its list is
+		// ordered: In progress climbs oldest-first (▲); Open and Closed lead
+		// with the most recent (▼).
 		{tabInProgress, "In progress", "Age ▲"},
-		{tabOpen, "Open", "Age"},
-		{tabClosed, fmt.Sprintf("Closed · %s", humanDuration(cfg.DoneWindow)), "Age"},
+		{tabOpen, "Open", "Age ▼"},
+		{tabClosed, fmt.Sprintf("Closed · %s", humanDuration(cfg.DoneWindow)), "Age ▼"},
 	}
 	for i, md := range meta {
 		m.tabs[i] = tab{
@@ -158,12 +187,9 @@ func newTable(focused bool) table.Model {
 		table.WithHeight(12),
 	)
 	st := table.DefaultStyles()
-	st.Header = st.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("212")).
-		BorderTop(false).BorderLeft(false).BorderRight(false).BorderBottom(true).
-		Bold(true)
-	st.Selected = st.Selected.Foreground(lipgloss.Color("46")).Bold(true)
+	st.Header = tblHeaderStyle
+	st.Cell = tblCellStyle
+	st.Selected = tblSelectedStyle
 	t.SetStyles(st)
 	return t
 }
@@ -195,6 +221,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.layoutTables()
 	case tea.KeyMsg:
+		if m.palette {
+			return m.handlePaletteKey(msg)
+		}
 		if model, cmd, handled := m.handleKey(msg.String()); handled {
 			return model, cmd
 		}
@@ -204,6 +233,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case usageMsg:
 		m.handleUsage(msg)
 		return m, nil
+	case transitionMsg:
+		return m, m.handleTransition(msg)
 	case autoRefreshTickMsg:
 		return m, m.handleAutoRefresh()
 	case spinner.TickMsg:
@@ -216,13 +247,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.tabs[m.active].table, cmd = m.tabs[m.active].table.Update(msg)
+	m.reconcileScroll(m.active)
 	return m, cmd
 }
 
 func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
+	if m.confirmDone {
+		return m.handleDoneConfirm(key)
+	}
 	if m.overlay != "" {
 		switch key {
-		case "esc", "u", "q", "ctrl+c":
+		case "esc", "q", "ctrl+c":
 			m.overlay = ""
 			m.status = "Overlay closed"
 			return m, nil, true
@@ -230,6 +265,8 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	switch key {
+	case "/", ":":
+		return m.openPalette(), nil, true
 	case "q", "ctrl+c", "esc":
 		return m, tea.Quit, true
 	case "right", "l", "tab":
@@ -244,16 +281,124 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 		return m.gotoTab(tabClosed), nil, true
 	case "r", "ctrl+r":
 		return m.refresh()
-	case "u":
-		m.status = "Computing usage…"
-		return m, tea.Batch(m.spinner.Tick, usageCmd(m.cfg, m.client)), true
 	case "enter":
 		return m, m.primaryAction(), true
+	case "shift+enter":
+		return m.promptDone()
 	case "c":
 		m.copySelected()
 		return m, nil, true
 	}
 	return m, nil, false
+}
+
+// promptDone opens the y/N confirmation to move the selected in-progress issue
+// to Done. It is a no-op outside the In progress tab.
+func (m *Model) promptDone() (tea.Model, tea.Cmd, bool) {
+	if m.active != tabInProgress {
+		m.status = "Move to Done only available on the In progress tab"
+		return m, nil, true
+	}
+	cur := &m.tabs[m.active]
+	cursor := cur.table.Cursor()
+	if cursor < 0 || cursor >= len(cur.rows) {
+		return m, nil, true
+	}
+	m.confirmDone = true
+	m.pendingDone = cur.rows[cursor]
+	m.err = ""
+	m.status = "Confirm move to Done"
+	return m, nil, true
+}
+
+// handleDoneConfirm routes keys while the Done confirmation prompt is up.
+func (m *Model) handleDoneConfirm(key string) (tea.Model, tea.Cmd, bool) {
+	switch key {
+	case "y", "Y", "enter":
+		issue := m.pendingDone
+		m.confirmDone = false
+		m.pendingDone = jira.Issue{}
+		m.loading = true
+		m.status = fmt.Sprintf("Moving %s to %s…", issue.Key, doneState)
+		return m, tea.Batch(m.spinner.Tick, transitionCmd(m.client, issue.Key, doneState)), true
+	case "n", "N", "esc", "q", "ctrl+c":
+		m.confirmDone = false
+		m.pendingDone = jira.Issue{}
+		m.status = "Move to Done cancelled"
+		return m, nil, true
+	}
+	return m, nil, true
+}
+
+func (m *Model) handleTransition(msg transitionMsg) tea.Cmd {
+	if msg.err != nil {
+		m.loading = false
+		m.err = msg.err.Error()
+		m.status = fmt.Sprintf("Failed to move %s", msg.key)
+		return nil
+	}
+	m.err = ""
+	m.status = fmt.Sprintf("Moved %s to %s — refreshing…", msg.key, doneState)
+	// loading is already true; fetch fresh state to reflect the new status.
+	return tea.Batch(m.spinner.Tick, fetchCmd(m.cfg, m.client))
+}
+
+// openPalette enters the slash-command line, mirroring prowl's "/usage" UX.
+func (m *Model) openPalette() *Model {
+	m.palette = true
+	m.paletteInput = ""
+	m.overlay = ""
+	m.err = ""
+	m.status = "Command palette — type usage · esc cancels"
+	return m
+}
+
+// handlePaletteKey edits/runs the slash-command line. Enter runs, esc cancels,
+// backspace edits, plain runes append.
+func (m *Model) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.palette = false
+		m.paletteInput = ""
+		m.status = "Palette closed"
+		return m, nil
+	case tea.KeyEnter:
+		input := strings.TrimSpace(m.paletteInput)
+		m.palette = false
+		m.paletteInput = ""
+		return m.runPaletteCommand(input)
+	case tea.KeyBackspace:
+		if r := []rune(m.paletteInput); len(r) > 0 {
+			m.paletteInput = string(r[:len(r)-1])
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.paletteInput += " "
+		return m, nil
+	case tea.KeyRunes:
+		m.paletteInput += string(msg.Runes)
+		return m, nil
+	}
+	return m, nil
+}
+
+// runPaletteCommand dispatches a palette command. A leading slash is tolerated.
+func (m *Model) runPaletteCommand(input string) (tea.Model, tea.Cmd) {
+	input = strings.TrimPrefix(input, "/")
+	if input == "" {
+		m.status = "Empty command"
+		return m, nil
+	}
+	cmd := strings.ToLower(strings.Fields(input)[0])
+	switch cmd {
+	case "usage", "stats":
+		m.status = "Computing usage…"
+		return m, tea.Batch(m.spinner.Tick, usageCmd(m.cfg, m.client))
+	default:
+		m.err = "unknown command: " + cmd
+		m.status = "Try: usage"
+		return m, nil
+	}
 }
 
 func (m *Model) switchTab(delta int) *Model {
@@ -268,6 +413,7 @@ func (m *Model) gotoTab(k tabKind) *Model {
 	m.tabs[m.active].table.Blur()
 	m.active = k
 	m.tabs[m.active].table.Focus()
+	m.reconcileScroll(m.active)
 	m.status = m.tabs[m.active].title
 	return m
 }
@@ -286,7 +432,7 @@ func (m *Model) handleAutoRefresh() tea.Cmd {
 	if next == nil {
 		return nil
 	}
-	if m.loading {
+	if m.loading || m.confirmDone || m.palette {
 		return next
 	}
 	m.loading = true
@@ -340,6 +486,9 @@ func (m *Model) handleFetch(msg fetchMsg) {
 			}
 		}
 	}
+	for i := range m.tabs {
+		m.reconcileScroll(tabKind(i))
+	}
 	m.status = fmt.Sprintf("%d in progress · %d open · %d closed",
 		len(msg.inProgress), len(msg.open), len(msg.done))
 }
@@ -362,6 +511,7 @@ func (m *Model) layoutTables() {
 	avail := max(m.height-7, 4)
 	for i := range m.tabs {
 		m.tabs[i].table.SetHeight(avail)
+		m.reconcileScroll(tabKind(i))
 	}
 }
 
@@ -468,11 +618,20 @@ func (m *Model) View() string {
 	if len(cur.rows) == 0 && !m.loading {
 		b.WriteString(hintStyle.Render("    — none —") + "\n")
 	} else {
-		b.WriteString(cur.table.View() + "\n")
+		b.WriteString(m.renderColoredTable(m.active) + "\n")
 	}
 
 	b.WriteString(m.renderScroll() + "\n")
-	b.WriteString(m.renderHints())
+
+	switch {
+	case m.confirmDone:
+		b.WriteString(errStyle.Render(fmt.Sprintf("🟣 Move %s to %s? [y/N]", m.pendingDone.Key, doneState)))
+	case m.palette:
+		b.WriteString(keyStyle.Render("/"+m.paletteInput+"▌") +
+			hintStyle.Render("   (commands: usage · esc cancels)"))
+	default:
+		b.WriteString(m.renderHints())
+	}
 	return b.String()
 }
 
@@ -519,11 +678,16 @@ func (m *Model) renderHints() string {
 		keyStyle.Render("←→/hl") + hintStyle.Render(" tabs"),
 		keyStyle.Render("↑↓/jk") + hintStyle.Render(" nav"),
 		keyStyle.Render("⏎") + hintStyle.Render(" open"),
-		keyStyle.Render("c") + hintStyle.Render(" copy"),
-		keyStyle.Render("u") + hintStyle.Render(" usage"),
-		keyStyle.Render("r") + hintStyle.Render(" refresh"),
-		keyStyle.Render("q") + hintStyle.Render(" quit"),
 	}
+	if m.active == tabInProgress {
+		hints = append(hints, keyStyle.Render("⇧⏎")+hintStyle.Render(" done"))
+	}
+	hints = append(hints,
+		keyStyle.Render("c")+hintStyle.Render(" copy"),
+		keyStyle.Render("/")+hintStyle.Render(" cmd"),
+		keyStyle.Render("r")+hintStyle.Render(" refresh"),
+		keyStyle.Render("q")+hintStyle.Render(" quit"),
+	)
 	return strings.Join(hints, hintStyle.Render(" · "))
 }
 
@@ -582,6 +746,122 @@ func (m *Model) copySelected() {
 		return
 	}
 	m.status = "Copied " + url
+}
+
+// renderColoredTable draws the active tab's header and visible rows, colouring
+// each row by age. It reuses the bubbles table only for cursor/viewport state
+// (Cursor/Height) and the precomputed column widths; rows are rendered here so
+// the age colour is applied *after* truncation, sidestepping the ANSI
+// corruption that blocked this in the bubbles table itself.
+func (m *Model) renderColoredTable(kind tabKind) string {
+	t := &m.tabs[kind]
+	cols := t.table.Columns()
+
+	cellsToRow := func(values []string, base lipgloss.Style) string {
+		rendered := make([]string, 0, len(cols))
+		for i, c := range cols {
+			if c.Width <= 0 {
+				continue
+			}
+			val := ""
+			if i < len(values) {
+				val = values[i]
+			}
+			inner := lipgloss.NewStyle().Width(c.Width).MaxWidth(c.Width).Inline(true)
+			rendered = append(rendered, base.Render(inner.Render(runewidth.Truncate(val, c.Width, "…"))))
+		}
+		return lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+	}
+
+	titles := make([]string, len(cols))
+	for i, c := range cols {
+		titles[i] = c.Title
+	}
+
+	h := max(t.table.Height(), 1)
+	cursor := t.table.Cursor()
+	start := t.offset
+	end := min(start+h, len(t.rows))
+	now := time.Now()
+
+	lines := make([]string, 0, h+1)
+	lines = append(lines, cellsToRow(titles, tblHeaderStyle))
+	for idx := start; idx < end; idx++ {
+		issue := t.rows[idx]
+		row := cellsToRow(issueCells(issue), tblCellStyle)
+		if idx == cursor {
+			row = tblSelectedStyle.Render(row)
+		} else {
+			row = lipgloss.NewStyle().Foreground(ageColor(kind, issue, now)).Render(row)
+		}
+		lines = append(lines, row)
+	}
+	// Pad to a stable height so the footer doesn't jump for short lists.
+	for len(lines) < h+1 {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// reconcileScroll keeps the active cursor inside the visible window, mirroring
+// the bubbles table's minimal-scroll behaviour now that rows are drawn here.
+func (m *Model) reconcileScroll(kind tabKind) {
+	t := &m.tabs[kind]
+	h := max(t.table.Height(), 1)
+	c := max(t.table.Cursor(), 0)
+	if c < t.offset {
+		t.offset = c
+	}
+	if c >= t.offset+h {
+		t.offset = c - h + 1
+	}
+	if maxOff := max(len(t.rows)-h, 0); t.offset > maxOff {
+		t.offset = maxOff
+	}
+	t.offset = max(t.offset, 0)
+}
+
+// ageColor maps an issue's age to a foreground colour, with a distinct gradient
+// per tab so each list degrades differently:
+//   - In progress: staleness of the last update, fresh green → stale red.
+//   - Open: time waiting since creation, new blue → old magenta.
+//   - Closed: recency of resolution, recent bright green → old faint grey.
+func ageColor(kind tabKind, i jira.Issue, now time.Time) lipgloss.Color {
+	ts := i.Updated
+	if kind == tabOpen {
+		ts = i.Created
+	}
+	if ts.IsZero() {
+		return lipgloss.Color("245")
+	}
+	days := now.Sub(ts).Hours() / 24
+	var ramp []struct {
+		max   float64
+		color string
+	}
+	switch kind {
+	case tabInProgress:
+		ramp = []struct {
+			max   float64
+			color string
+		}{{1, "46"}, {3, "82"}, {7, "226"}, {14, "214"}, {1e9, "196"}}
+	case tabOpen:
+		ramp = []struct {
+			max   float64
+			color string
+		}{{2, "39"}, {7, "75"}, {14, "141"}, {30, "170"}, {1e9, "201"}}
+	default: // tabClosed
+		ramp = []struct {
+			max   float64
+			color string
+		}{{1, "46"}, {3, "42"}, {7, "35"}, {14, "65"}, {1e9, "240"}}
+	}
+	for _, step := range ramp {
+		if days < step.max {
+			return lipgloss.Color(step.color)
+		}
+	}
+	return lipgloss.Color("245")
 }
 
 func issueCells(i jira.Issue) []string {

@@ -15,6 +15,8 @@ type MockClient struct {
 	DoneIssues       []Issue // candidates for RecentlyDone / WeeklyDone, with Resolved set
 	GetErr           error
 	ListErr          error
+	TransitionErr    error
+	Transitions      [][2]string // recorded (key, state) calls
 }
 
 // NewMockClient builds an empty MockClient.
@@ -98,6 +100,15 @@ func (m *MockClient) Get(_ context.Context, key string) (Issue, error) {
 		}
 	}
 	return Issue{}, fmt.Errorf("issue not found: %s", key)
+}
+
+// Transition records the requested move and returns TransitionErr if set.
+func (m *MockClient) Transition(_ context.Context, key, state string) error {
+	if m.TransitionErr != nil {
+		return m.TransitionErr
+	}
+	m.Transitions = append(m.Transitions, [2]string{key, state})
+	return nil
 }
 
 func doneAt(i Issue) time.Time {

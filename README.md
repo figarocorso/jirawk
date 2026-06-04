@@ -20,6 +20,13 @@ issues you've resolved per week.
 - Interactive Bubble Tea TUI with three tabs (in progress / open / closed),
   ←/→ or `h`/`l` to switch, `enter` to open an issue in the browser. A scroll
   indicator shows how many issues sit above/below the current selection.
+- Rows are **colored by age**, with a different gradient per tab: in-progress
+  fades fresh→stale (green→red), open fades new→old (blue→magenta), closed
+  fades recent→old (green→grey). Each tab's `Age` header carries a `▲`/`▼`
+  arrow showing why the list is ordered.
+- `⇧⏎` on the in-progress tab moves the selected issue to **Done** (with a
+  `y/N` confirmation), then refreshes.
+- `/` (or `:`) opens a slash-command palette; `/usage` shows the stats overlay.
 - One-shot non-interactive `jirawk list` (use `--json` for agents).
 - `jirawk stats` — in-progress count + weekly resolved bar chart.
 - `jirawk watch` — TUI with periodic auto-refresh.
@@ -45,7 +52,10 @@ jirawk check
 
 ## Install
 
-### Homebrew (macOS / Linux)
+### Homebrew (macOS)
+
+Distributed as a Homebrew cask (Linux users: use `go install` or build from
+source below).
 
 ```sh
 brew install figarocorso/tap/jirawk

@@ -42,6 +42,8 @@ type Client interface {
 	WeeklyDone(ctx context.Context, weeks int) ([]int, error)
 	// Get fetches a single issue by key.
 	Get(ctx context.Context, key string) (Issue, error)
+	// Transition moves an issue to the named target state (e.g. "Done").
+	Transition(ctx context.Context, key, state string) error
 }
 
 // Section identifies which bucket an issue belongs to in the UI.

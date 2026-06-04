@@ -33,6 +33,20 @@ type usageMsg struct {
 	err   error
 }
 
+// transitionMsg reports the result of moving an issue to a new state.
+type transitionMsg struct {
+	key string
+	err error
+}
+
+// transitionCmd moves an issue to the target state in the background.
+func transitionCmd(client jira.Client, key, state string) tea.Cmd {
+	return func() tea.Msg {
+		err := client.Transition(context.Background(), key, state)
+		return transitionMsg{key: key, err: err}
+	}
+}
+
 // fetchCmd fetches all sections concurrently.
 func fetchCmd(cfg *config.Config, client jira.Client) tea.Cmd {
 	return func() tea.Msg {

@@ -244,3 +244,16 @@ func (c *CLIClient) Get(ctx context.Context, key string) (Issue, error) {
 	}
 	return issues[0], nil
 }
+
+// Transition moves an issue to the target state via `jira issue move`.
+func (c *CLIClient) Transition(ctx context.Context, key, state string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("empty issue key")
+	}
+	if strings.TrimSpace(state) == "" {
+		return fmt.Errorf("empty target state")
+	}
+	_, err := c.runner(ctx, "issue", "move", key, state)
+	return err
+}

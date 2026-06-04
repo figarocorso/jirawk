@@ -6,8 +6,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/figarocorso/jirawk/internal/config"
 	"github.com/figarocorso/jirawk/internal/jira"
+	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +137,172 @@ func TestModelFollowsSelectionAcrossTabs(t *testing.T) {
 	m.handleFetch(fetchMsg{done: []jira.Issue{{Key: "OP-1", Status: "Done"}}})
 	assert.Equal(t, tabClosed, m.active)
 	assert.Equal(t, "OP-1", m.selectedKeyOf(tabClosed))
+}
+
+func TestModelPaletteUsageCommand(t *testing.T) {
+	m := testModel()
+	// "/" opens the palette.
+	updated, _, handled := m.handleKey("/")
+	m = updated.(*Model)
+	require.True(t, handled)
+	require.True(t, m.palette)
+
+	// Type "usage" then Enter runs the usage command.
+	for _, r := range "usage" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(*Model)
+	}
+	assert.Equal(t, "usage", m.paletteInput)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*Model)
+	assert.False(t, m.palette)
+	require.NotNil(t, cmd)
+
+	// The command computes stats; feed the result back to render the overlay.
+	m.handleUsage(usageMsg{stats: jira.Stats{InProgress: 2, Weeks: []int{1}, DoneTotal: 1}})
+	assert.Contains(t, m.View(), "jirawk usage")
+}
+
+func TestModelPaletteEscCancels(t *testing.T) {
+	m := testModel()
+	updated, _, _ := m.handleKey("/")
+	m = updated.(*Model)
+	require.True(t, m.palette)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(*Model)
+	assert.False(t, m.palette)
+}
+
+func TestModelMoveToDoneConfirmed(t *testing.T) {
+	mock := jira.NewMockClient()
+	cfg := &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4}
+	m := New(cfg, mock)
+	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+
+	// shift+enter prompts; view shows the confirmation.
+	updated, _, handled := m.handleKey("shift+enter")
+	m = updated.(*Model)
+	require.True(t, handled)
+	require.True(t, m.confirmDone)
+	assert.Contains(t, m.View(), "Move OP-1 to Done?")
+
+	// "y" confirms and fires the transition command.
+	updated, cmd, _ := m.handleKey("y")
+	m = updated.(*Model)
+	assert.False(t, m.confirmDone)
+	require.NotNil(t, cmd)
+	msg := cmd()
+	// Batch returns a slice of messages; find the transitionMsg.
+	tmsg := extractTransition(t, msg)
+	assert.Equal(t, "OP-1", tmsg.key)
+	assert.Nil(t, tmsg.err)
+	require.Len(t, mock.Transitions, 1)
+	assert.Equal(t, [2]string{"OP-1", "Done"}, mock.Transitions[0])
+}
+
+func TestModelMoveToDoneCancelled(t *testing.T) {
+	m := testModel()
+	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	updated, _, _ := m.handleKey("shift+enter")
+	m = updated.(*Model)
+	require.True(t, m.confirmDone)
+	updated, _, _ = m.handleKey("n")
+	m = updated.(*Model)
+	assert.False(t, m.confirmDone)
+}
+
+func TestModelMoveToDoneOnlyOnInProgressTab(t *testing.T) {
+	m := testModel()
+	m.gotoTab(tabOpen)
+	updated, _, _ := m.handleKey("shift+enter")
+	m = updated.(*Model)
+	assert.False(t, m.confirmDone, "Done move should be a no-op outside the In progress tab")
+}
+
+// extractTransition pulls the transitionMsg out of a (possibly batched) tea.Msg.
+func extractTransition(t *testing.T, msg tea.Msg) transitionMsg {
+	t.Helper()
+	switch v := msg.(type) {
+	case transitionMsg:
+		return v
+	case tea.BatchMsg:
+		for _, c := range v {
+			if c == nil {
+				continue
+			}
+			if tm, ok := extractTransitionFrom(c()); ok {
+				return tm
+			}
+		}
+	}
+	t.Fatalf("no transitionMsg in %#v", msg)
+	return transitionMsg{}
+}
+
+func extractTransitionFrom(msg tea.Msg) (transitionMsg, bool) {
+	if tm, ok := msg.(transitionMsg); ok {
+		return tm, true
+	}
+	return transitionMsg{}, false
+}
+
+func TestModelSortArrowsPerTab(t *testing.T) {
+	m := testModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(*Model)
+	assert.Equal(t, "Age ▲", m.tabs[tabInProgress].ageDesc, "in progress: oldest first")
+	assert.Equal(t, "Age ▼", m.tabs[tabOpen].ageDesc, "open: newest first")
+	assert.Equal(t, "Age ▼", m.tabs[tabClosed].ageDesc, "closed: newest first")
+	assert.Contains(t, m.View(), "Age ▲", "active tab header carries its arrow")
+}
+
+func TestAgeColorGradients(t *testing.T) {
+	now := time.Now()
+	fresh := jira.Issue{Updated: now.Add(-2 * time.Hour), Created: now.Add(-2 * time.Hour)}
+	stale := jira.Issue{Updated: now.Add(-30 * 24 * time.Hour), Created: now.Add(-30 * 24 * time.Hour)}
+
+	// Each tab maps the same ages to different colours (degrades differently).
+	assert.NotEqual(t, ageColor(tabInProgress, fresh, now), ageColor(tabInProgress, stale, now))
+	assert.NotEqual(t, ageColor(tabOpen, fresh, now), ageColor(tabClosed, fresh, now))
+	// Zero timestamp falls back to a neutral grey.
+	assert.Equal(t, lipgloss.Color("245"), ageColor(tabInProgress, jira.Issue{}, now))
+}
+
+func TestRenderColoredTableEmbedsAnsiAndStaysIntact(t *testing.T) {
+	// Tests run without a TTY (Ascii profile strips colour); force a profile so
+	// the ANSI is actually emitted and we can prove it doesn't corrupt the text.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	m := testModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(*Model)
+	now := time.Now()
+	m.handleFetch(fetchMsg{inProgress: []jira.Issue{
+		{Key: "OP-1", Summary: "fix", Status: "In Progress", Updated: now.Add(-2 * time.Hour)},
+	}})
+	out := m.renderColoredTable(tabInProgress)
+	assert.Contains(t, out, "\x1b[", "rows should carry ANSI colour")
+	// The key text must survive intact (no mid-escape truncation corruption).
+	assert.Contains(t, out, "OP-1")
+}
+
+func TestModelScrollWindowFollowsCursor(t *testing.T) {
+	m := testModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 12})
+	m = updated.(*Model)
+	rows := make([]jira.Issue, 50)
+	for i := range rows {
+		rows[i] = jira.Issue{Key: fmt.Sprintf("OP-%d", i), Status: "In Progress"}
+	}
+	m.handleFetch(fetchMsg{inProgress: rows})
+	m.tabs[tabInProgress].table.SetCursor(40)
+	m.reconcileScroll(tabInProgress)
+	off := m.tabs[tabInProgress].offset
+	h := m.tabs[tabInProgress].table.Height()
+	assert.GreaterOrEqual(t, 40, off)
+	assert.Less(t, 40, off+h, "cursor must be inside the visible window")
 }
 
 type assertErr struct{}
