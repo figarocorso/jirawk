@@ -248,10 +248,7 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 		m.status = "Computing usage…"
 		return m, tea.Batch(m.spinner.Tick, usageCmd(m.cfg, m.client)), true
 	case "enter":
-		if url := m.selectedURL(); url != "" {
-			_ = openInBrowser(url)
-		}
-		return m, nil, true
+		return m, m.primaryAction(), true
 	case "c":
 		m.copySelected()
 		return m, nil, true
@@ -304,6 +301,15 @@ func (m *Model) handleFetch(msg fetchMsg) {
 		return
 	}
 	m.err = ""
+	// Remember each tab's selection (by issue key) so it survives the refresh.
+	// An issue can also change status and move to another tab between fetches,
+	// so we track the active selection separately to follow it across tabs.
+	var prevKeys [numTabs]string
+	for i := range m.tabs {
+		prevKeys[i] = m.selectedKeyOf(tabKind(i))
+	}
+	activeKey := prevKeys[m.active]
+
 	// In progress: oldest (most stale) first. Open: newest created first.
 	// Closed: most recently updated first.
 	jira.SortByAgeOldestFirst(msg.inProgress)
@@ -316,6 +322,24 @@ func (m *Model) handleFetch(msg fetchMsg) {
 		m.tabs[i].table.SetRows(issuesToRows(m.tabs[i].rows))
 	}
 	m.layoutTables()
+	// Restore each tab's cursor to wherever its previously-selected issue landed.
+	for i := range m.tabs {
+		if idx := indexOfKey(m.tabs[i].rows, prevKeys[i]); idx >= 0 {
+			m.tabs[i].table.SetCursor(idx)
+		}
+	}
+	// If the active selection moved out of the active tab, follow it.
+	if activeKey != "" && indexOfKey(m.tabs[m.active].rows, activeKey) < 0 {
+		for i := range m.tabs {
+			if idx := indexOfKey(m.tabs[i].rows, activeKey); idx >= 0 {
+				m.tabs[m.active].table.Blur()
+				m.active = tabKind(i)
+				m.tabs[m.active].table.Focus()
+				m.tabs[m.active].table.SetCursor(idx)
+				break
+			}
+		}
+	}
 	m.status = fmt.Sprintf("%d in progress · %d open · %d closed",
 		len(msg.inProgress), len(msg.open), len(msg.done))
 }
@@ -429,6 +453,7 @@ func (m *Model) View() string {
 
 	if m.err != "" {
 		b.WriteString("\n" + errStyle.Render("✗ "+m.err) + "\n")
+		b.WriteString(hintStyle.Render("  run 'jirawk check' to diagnose") + "\n")
 	}
 
 	if m.overlay != "" {
@@ -500,6 +525,42 @@ func (m *Model) renderHints() string {
 		keyStyle.Render("q") + hintStyle.Render(" quit"),
 	}
 	return strings.Join(hints, hintStyle.Render(" · "))
+}
+
+// primaryAction runs the active view's default ("intro") action triggered by
+// Enter. Every view's primary action is currently "open the selected issue in
+// the browser"; kept as a per-view switch so views can diverge later.
+func (m *Model) primaryAction() tea.Cmd {
+	switch m.active {
+	case tabInProgress, tabOpen, tabClosed:
+		if url := m.selectedURL(); url != "" {
+			_ = openInBrowser(url)
+		}
+	}
+	return nil
+}
+
+// selectedKeyOf returns the issue key currently under tab k's cursor, or "".
+func (m *Model) selectedKeyOf(k tabKind) string {
+	t := &m.tabs[k]
+	cursor := t.table.Cursor()
+	if cursor < 0 || cursor >= len(t.rows) {
+		return ""
+	}
+	return t.rows[cursor].Key
+}
+
+// indexOfKey returns the row index of the issue with the given key, or -1.
+func indexOfKey(rows []jira.Issue, key string) int {
+	if key == "" {
+		return -1
+	}
+	for i := range rows {
+		if rows[i].Key == key {
+			return i
+		}
+	}
+	return -1
 }
 
 func (m *Model) selectedURL() string {

@@ -101,7 +101,40 @@ func TestModelUsageOverlay(t *testing.T) {
 func TestModelFetchError(t *testing.T) {
 	m := testModel()
 	m.handleFetch(fetchMsg{err: assertErr{}})
-	assert.Contains(t, m.View(), "boom")
+	view := m.View()
+	assert.Contains(t, view, "boom")
+	assert.Contains(t, view, "jirawk check")
+}
+
+func TestModelPreservesCursorOnRefresh(t *testing.T) {
+	m := testModel()
+	rows := []jira.Issue{
+		{Key: "OP-1", Status: "In Progress"},
+		{Key: "OP-2", Status: "In Progress"},
+		{Key: "OP-3", Status: "In Progress"},
+	}
+	m.handleFetch(fetchMsg{inProgress: rows})
+	m.tabs[tabInProgress].table.SetCursor(1) // select OP-2
+
+	// Refresh with the list reordered; OP-2 is now last.
+	m.handleFetch(fetchMsg{inProgress: []jira.Issue{
+		{Key: "OP-3", Status: "In Progress"},
+		{Key: "OP-1", Status: "In Progress"},
+		{Key: "OP-2", Status: "In Progress"},
+	}})
+	assert.Equal(t, "OP-2", m.selectedKeyOf(tabInProgress), "cursor should follow the selected key")
+}
+
+func TestModelFollowsSelectionAcrossTabs(t *testing.T) {
+	m := testModel()
+	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	require.Equal(t, tabInProgress, m.active)
+	require.Equal(t, "OP-1", m.selectedKeyOf(tabInProgress))
+
+	// OP-1 gets resolved → moves to the closed tab. Active view follows it.
+	m.handleFetch(fetchMsg{done: []jira.Issue{{Key: "OP-1", Status: "Done"}}})
+	assert.Equal(t, tabClosed, m.active)
+	assert.Equal(t, "OP-1", m.selectedKeyOf(tabClosed))
 }
 
 type assertErr struct{}
