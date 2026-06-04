@@ -11,6 +11,7 @@ import (
 // MockClient is an in-memory Client for tests and offline development.
 type MockClient struct {
 	InProgressIssues []Issue
+	OpenIssues       []Issue
 	DoneIssues       []Issue // candidates for RecentlyDone / WeeklyDone, with Resolved set
 	GetErr           error
 	ListErr          error
@@ -43,6 +44,14 @@ func (m *MockClient) InProgress(_ context.Context) ([]Issue, error) {
 		return nil, m.ListErr
 	}
 	return m.InProgressIssues, nil
+}
+
+// Open returns the configured not-started issues.
+func (m *MockClient) Open(_ context.Context) ([]Issue, error) {
+	if m.ListErr != nil {
+		return nil, m.ListErr
+	}
+	return m.OpenIssues, nil
 }
 
 // RecentlyDone returns done issues whose Resolved (or Updated) falls within the

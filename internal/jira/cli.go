@@ -191,6 +191,11 @@ func (c *CLIClient) InProgress(ctx context.Context) ([]Issue, error) {
 	return c.query(ctx, jqlInProgress(c.statusClause))
 }
 
+// Open fetches the user's not-yet-started issues across all projects.
+func (c *CLIClient) Open(ctx context.Context) ([]Issue, error) {
+	return c.query(ctx, jqlNotStarted())
+}
+
 // RecentlyDone fetches issues the user resolved within the given window.
 func (c *CLIClient) RecentlyDone(ctx context.Context, within time.Duration) ([]Issue, error) {
 	return c.query(ctx, jqlDoneWithin(within))

@@ -42,6 +42,9 @@ func sampleMock() *jira.MockClient {
 		{Key: "OP-1", Summary: "fix thing", Status: "In Progress", Priority: "High", Updated: now.Add(-2 * time.Hour), URL: "https://x/browse/OP-1"},
 		{Key: "QA-9", Summary: "test thing", Status: "In Review", Priority: "Medium", Updated: now.Add(-26 * time.Hour)},
 	}
+	m.OpenIssues = []jira.Issue{
+		{Key: "OP-7", Summary: "todo thing", Status: "To Do", Priority: "Low", Created: now.Add(-time.Hour)},
+	}
 	m.DoneIssues = []jira.Issue{
 		{Key: "OP-2", Summary: "done thing", Status: "Resolved", Priority: "Low", Resolved: now.Add(-3 * time.Hour), Updated: now.Add(-3 * time.Hour)},
 		{Key: "OP-3", Summary: "old thing", Status: "Done", Resolved: now.Add(-20 * 24 * time.Hour), Updated: now.Add(-20 * 24 * time.Hour)},
@@ -55,9 +58,19 @@ func TestListAll(t *testing.T) {
 	assert.Contains(t, out, "in progress (2)")
 	assert.Contains(t, out, "OP-1")
 	assert.Contains(t, out, "QA-9")
+	assert.Contains(t, out, "open (1)")
+	assert.Contains(t, out, "OP-7")
 	assert.Contains(t, out, "closed")
-	assert.Contains(t, out, "OP-2")    // resolved within 24h window
-	assert.NotContains(t, out, "OP-3") // resolved 20d ago, outside window
+	assert.Contains(t, out, "OP-2") // resolved within window
+	assert.Contains(t, out, "OP-3") // resolved 20d ago, within new 30d window
+}
+
+func TestListOpenSection(t *testing.T) {
+	withMock(t, sampleMock())
+	out := run(t, "list", "--section", "open")
+	assert.Contains(t, out, "open (1)")
+	assert.Contains(t, out, "OP-7")
+	assert.NotContains(t, out, "OP-1")
 }
 
 func TestListJSON(t *testing.T) {

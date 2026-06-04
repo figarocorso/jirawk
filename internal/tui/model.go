@@ -19,15 +19,16 @@ type autoRefreshTickMsg time.Time
 
 var (
 	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
 	statusStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	okStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	doneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	keyStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	hintStyle    = lipgloss.NewStyle().Faint(true)
 	barStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
-	dimSection   = lipgloss.NewStyle().Faint(true).Bold(true)
+	scrollStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	tabActive    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("212")).Padding(0, 1)
+	tabInactive  = lipgloss.NewStyle().Faint(true).Padding(0, 1)
+	tabSeparator = lipgloss.NewStyle().Faint(true)
 )
 
 // statusEmojiLabel returns an emoji-prefixed status name (no ANSI, so the
@@ -55,21 +56,31 @@ func statusEmojiLabel(status string) string {
 	return emoji + " " + status
 }
 
-// section indexes the two focusable tables.
-type section int
+// tabKind enumerates the three views.
+type tabKind int
 
 const (
-	secInProgress section = iota
-	secDone
+	tabInProgress tabKind = iota
+	tabOpen
+	tabClosed
+	numTabs
 )
 
-// Model is the Bubble Tea state for jirawk's TUI.
+// tab holds one view's table, its rows, and presentation metadata.
+type tab struct {
+	kind    tabKind
+	title   string
+	ageDesc string // header label for the Age column (carries the sort arrow)
+	table   table.Model
+	rows    []jira.Issue
+}
+
+// Model is the Bubble Tea state for jirawk's tabbed TUI.
 type Model struct {
 	cfg     *config.Config
 	client  jira.Client
-	tables  [2]table.Model
-	rows    [2][]jira.Issue
-	focus   section
+	tabs    [numTabs]tab
+	active  tabKind
 	spinner spinner.Model
 	loading bool
 	status  string
@@ -101,6 +112,7 @@ func (m *Model) autoRefreshCmd() tea.Cmd {
 
 var columnHeaders = []string{"KEY", "Status", "Priority", "Age", "Summary"}
 
+const ageColIdx = 3
 const columnPad = 2
 const minSummaryWidth = 20
 
@@ -116,19 +128,34 @@ func New(cfg *config.Config, client jira.Client) *Model {
 		spinner: sp,
 		loading: true,
 		status:  "Loading…",
-		focus:   secInProgress,
+		active:  tabInProgress,
 	}
-	for i := range m.tables {
-		m.tables[i] = newTable(i == 0)
+	// In-progress is sorted oldest-first by age (▲ marks the sort column).
+	meta := [numTabs]struct {
+		kind    tabKind
+		title   string
+		ageDesc string
+	}{
+		{tabInProgress, "In progress", "Age ▲"},
+		{tabOpen, "Open", "Age"},
+		{tabClosed, fmt.Sprintf("Closed · %s", humanDuration(cfg.DoneWindow)), "Age"},
+	}
+	for i, md := range meta {
+		m.tabs[i] = tab{
+			kind:    md.kind,
+			title:   md.title,
+			ageDesc: md.ageDesc,
+			table:   newTable(md.kind == tabInProgress),
+		}
 	}
 	return m
 }
 
 func newTable(focused bool) table.Model {
 	t := table.New(
-		table.WithColumns(initialColumns()),
+		table.WithColumns(initialColumns("Age")),
 		table.WithFocused(focused),
-		table.WithHeight(6),
+		table.WithHeight(12),
 	)
 	st := table.DefaultStyles()
 	st.Header = st.Header.
@@ -141,10 +168,14 @@ func newTable(focused bool) table.Model {
 	return t
 }
 
-func initialColumns() []table.Column {
+func initialColumns(ageTitle string) []table.Column {
 	cols := make([]table.Column, len(columnHeaders))
 	for i, h := range columnHeaders {
-		cols[i] = table.Column{Title: h, Width: lipgloss.Width(h) + columnPad}
+		title := h
+		if i == ageColIdx {
+			title = ageTitle
+		}
+		cols[i] = table.Column{Title: title, Width: lipgloss.Width(title) + columnPad}
 	}
 	return cols
 }
@@ -184,7 +215,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	m.tables[m.focus], cmd = m.tables[m.focus].Update(msg)
+	m.tabs[m.active].table, cmd = m.tabs[m.active].table.Update(msg)
 	return m, cmd
 }
 
@@ -201,8 +232,16 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 	switch key {
 	case "q", "ctrl+c", "esc":
 		return m, tea.Quit, true
-	case "tab", "shift+tab":
-		return m.toggleFocus(), nil, true
+	case "right", "l", "tab":
+		return m.switchTab(1), nil, true
+	case "left", "h", "shift+tab":
+		return m.switchTab(-1), nil, true
+	case "1":
+		return m.gotoTab(tabInProgress), nil, true
+	case "2":
+		return m.gotoTab(tabOpen), nil, true
+	case "3":
+		return m.gotoTab(tabClosed), nil, true
 	case "r", "ctrl+r":
 		return m.refresh()
 	case "u":
@@ -220,14 +259,19 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-func (m *Model) toggleFocus() *Model {
-	m.tables[m.focus].Blur()
-	if m.focus == secInProgress {
-		m.focus = secDone
-	} else {
-		m.focus = secInProgress
+func (m *Model) switchTab(delta int) *Model {
+	next := tabKind((int(m.active) + delta + int(numTabs)) % int(numTabs))
+	return m.gotoTab(next)
+}
+
+func (m *Model) gotoTab(k tabKind) *Model {
+	if k == m.active {
+		return m
 	}
-	m.tables[m.focus].Focus()
+	m.tabs[m.active].table.Blur()
+	m.active = k
+	m.tabs[m.active].table.Focus()
+	m.status = m.tabs[m.active].title
 	return m
 }
 
@@ -260,12 +304,20 @@ func (m *Model) handleFetch(msg fetchMsg) {
 		return
 	}
 	m.err = ""
-	m.rows[secInProgress] = msg.inProgress
-	m.rows[secDone] = msg.done
-	m.tables[secInProgress].SetRows(issuesToRows(msg.inProgress))
-	m.tables[secDone].SetRows(issuesToRows(msg.done))
+	// In progress: oldest (most stale) first. Open: newest created first.
+	// Closed: most recently updated first.
+	jira.SortByAgeOldestFirst(msg.inProgress)
+	jira.SortByCreatedNewestFirst(msg.open)
+	jira.SortByUpdatedNewestFirst(msg.done)
+	m.tabs[tabInProgress].rows = msg.inProgress
+	m.tabs[tabOpen].rows = msg.open
+	m.tabs[tabClosed].rows = msg.done
+	for i := range m.tabs {
+		m.tabs[i].table.SetRows(issuesToRows(m.tabs[i].rows))
+	}
 	m.layoutTables()
-	m.status = fmt.Sprintf("%d in progress · %d closed recently", len(msg.inProgress), len(msg.done))
+	m.status = fmt.Sprintf("%d in progress · %d open · %d closed",
+		len(msg.inProgress), len(msg.open), len(msg.done))
 }
 
 func (m *Model) handleUsage(msg usageMsg) {
@@ -282,24 +334,32 @@ func (m *Model) layoutTables() {
 	if m.width > 0 {
 		m.recomputeColumnWidths()
 	}
-	// Split the vertical space: header + two section titles + hints ≈ 8 lines.
-	avail := max(m.height-9, 6)
-	per := max(avail/2, 3)
-	m.tables[secInProgress].SetHeight(per)
-	m.tables[secDone].SetHeight(per)
+	// header + tab bar + spacing + footer ≈ 7 lines.
+	avail := max(m.height-7, 4)
+	for i := range m.tabs {
+		m.tabs[i].table.SetHeight(avail)
+	}
 }
 
 func (m *Model) recomputeColumnWidths() {
-	widths, hasContent := colWidthsFromRows(m.rows[secInProgress], m.rows[secDone])
+	allRows := make([][]jira.Issue, 0, numTabs)
+	for i := range m.tabs {
+		allRows = append(allRows, m.tabs[i].rows)
+	}
+	widths, hasContent := colWidthsFromRows(allRows...)
 	finalizeColWidths(widths, hasContent)
 	summaryIdx := len(columnHeaders) - 1
 	widths[summaryIdx] = expandSummaryWidth(widths, summaryIdx, m.width)
-	cols := make([]table.Column, len(columnHeaders))
-	for i, h := range columnHeaders {
-		cols[i] = table.Column{Title: h, Width: widths[i]}
-	}
-	for i := range m.tables {
-		m.tables[i].SetColumns(cols)
+	for i := range m.tabs {
+		cols := make([]table.Column, len(columnHeaders))
+		for c, h := range columnHeaders {
+			title := h
+			if c == ageColIdx {
+				title = m.tabs[i].ageDesc
+			}
+			cols[c] = table.Column{Title: title, Width: widths[c]}
+		}
+		m.tabs[i].table.SetColumns(cols)
 	}
 }
 
@@ -309,6 +369,8 @@ func colWidthsFromRows(sets ...[]jira.Issue) ([]int, []bool) {
 	for i, h := range columnHeaders {
 		widths[i] = lipgloss.Width(h)
 	}
+	// "Age ▲" header is wider than "Age"; reserve for it.
+	widths[ageColIdx] = lipgloss.Width("Age ▲")
 	for _, set := range sets {
 		for _, issue := range set {
 			for i, c := range issueCells(issue) {
@@ -328,6 +390,9 @@ func finalizeColWidths(widths []int, hasContent []bool) {
 	for i, h := range columnHeaders {
 		if !hasContent[i] {
 			widths[i] = lipgloss.Width(h)
+			if i == ageColIdx {
+				widths[i] = lipgloss.Width("Age ▲")
+			}
 		}
 		widths[i] += columnPad
 	}
@@ -372,49 +437,78 @@ func (m *Model) View() string {
 		return b.String()
 	}
 
-	b.WriteString("\n")
-	b.WriteString(m.renderSection(secInProgress, "In progress", okStyle))
-	b.WriteString("\n")
-	b.WriteString(m.renderSection(secDone, fmt.Sprintf("Closed · last %s", humanDuration(m.cfg.DoneWindow)), doneStyle))
+	b.WriteString("\n" + m.renderTabBar() + "\n\n")
 
+	cur := &m.tabs[m.active]
+	if len(cur.rows) == 0 && !m.loading {
+		b.WriteString(hintStyle.Render("    — none —") + "\n")
+	} else {
+		b.WriteString(cur.table.View() + "\n")
+	}
+
+	b.WriteString(m.renderScroll() + "\n")
+	b.WriteString(m.renderHints())
+	return b.String()
+}
+
+func (m *Model) renderTabBar() string {
+	parts := make([]string, 0, numTabs)
+	for i := range m.tabs {
+		label := fmt.Sprintf("%s (%d)", m.tabs[i].title, len(m.tabs[i].rows))
+		if tabKind(i) == m.active {
+			parts = append(parts, tabActive.Render(label))
+		} else {
+			parts = append(parts, tabInactive.Render(label))
+		}
+	}
+	return strings.Join(parts, tabSeparator.Render("  "))
+}
+
+// renderScroll shows how many rows sit above/below the current selection, so a
+// long list visibly signals there is more to scroll to.
+func (m *Model) renderScroll() string {
+	cur := &m.tabs[m.active]
+	total := len(cur.rows)
+	if total == 0 {
+		return ""
+	}
+	cursor := cur.table.Cursor()
+	above := cursor
+	below := total - cursor - 1
+	var parts []string
+	if above > 0 {
+		parts = append(parts, scrollStyle.Render(fmt.Sprintf("▲ %d more above", above)))
+	}
+	if below > 0 {
+		parts = append(parts, scrollStyle.Render(fmt.Sprintf("▼ %d more below", below)))
+	}
+	pos := hintStyle.Render(fmt.Sprintf("%d/%d", cursor+1, total))
+	if len(parts) == 0 {
+		return pos
+	}
+	return pos + "  " + strings.Join(parts, hintStyle.Render(" · "))
+}
+
+func (m *Model) renderHints() string {
 	hints := []string{
+		keyStyle.Render("←→/hl") + hintStyle.Render(" tabs"),
 		keyStyle.Render("↑↓/jk") + hintStyle.Render(" nav"),
-		keyStyle.Render("⇥") + hintStyle.Render(" switch"),
 		keyStyle.Render("⏎") + hintStyle.Render(" open"),
 		keyStyle.Render("c") + hintStyle.Render(" copy"),
 		keyStyle.Render("u") + hintStyle.Render(" usage"),
 		keyStyle.Render("r") + hintStyle.Render(" refresh"),
 		keyStyle.Render("q") + hintStyle.Render(" quit"),
 	}
-	b.WriteString("\n" + strings.Join(hints, hintStyle.Render(" · ")))
-	return b.String()
-}
-
-func (m *Model) renderSection(sec section, title string, accent lipgloss.Style) string {
-	count := len(m.rows[sec])
-	style := dimSection
-	if m.focus == sec {
-		style = sectionStyle
-	}
-	head := style.Render(fmt.Sprintf("%s (%d)", title, count))
-	if m.focus == sec {
-		head = accent.Render("▸ ") + head
-	} else {
-		head = "  " + head
-	}
-	if count == 0 && !m.loading {
-		return head + "\n" + hintStyle.Render("    — none —") + "\n"
-	}
-	return head + "\n" + m.tables[sec].View() + "\n"
+	return strings.Join(hints, hintStyle.Render(" · "))
 }
 
 func (m *Model) selectedURL() string {
-	rows := m.rows[m.focus]
-	cursor := m.tables[m.focus].Cursor()
-	if cursor < 0 || cursor >= len(rows) {
+	cur := &m.tabs[m.active]
+	cursor := cur.table.Cursor()
+	if cursor < 0 || cursor >= len(cur.rows) {
 		return ""
 	}
-	return rows[cursor].URL
+	return cur.rows[cursor].URL
 }
 
 func (m *Model) copySelected() {
@@ -476,7 +570,7 @@ func formatUsage(s jira.Stats, now time.Time) string {
 	return b.String()
 }
 
-// humanDuration renders a window like 24h / 2d for section titles.
+// humanDuration renders a window like 24h / 30d for tab titles.
 func humanDuration(d time.Duration) string {
 	if d%(24*time.Hour) == 0 {
 		days := int(d.Hours()) / 24

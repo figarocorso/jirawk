@@ -19,11 +19,11 @@ func (s *Server) toolDefinitions() []toolDef {
 	return []toolDef{
 		{
 			Name:        "list_issues",
-			Description: "List the current user's Jira issues. section=in-progress (default), done (closed in the configured window, e.g. last 24h), or all.",
+			Description: "List the current user's Jira issues. section=in-progress (default), open (not started), done (closed within the configured window, e.g. last 30d), or all.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"section": map[string]any{"type": "string", "enum": []string{"in-progress", "done", "all"}, "default": "in-progress"},
+					"section": map[string]any{"type": "string", "enum": []string{"in-progress", "open", "done", "all"}, "default": "in-progress"},
 				},
 			},
 		},
@@ -114,6 +114,13 @@ func (s *Server) toolListIssues(ctx context.Context, args map[string]any) (toolR
 			return toolResult{}, err
 		}
 		payload["in_progress"] = issues
+	}
+	if section == "open" || section == "all" {
+		issues, err := s.client.Open(ctx)
+		if err != nil {
+			return toolResult{}, err
+		}
+		payload["open"] = issues
 	}
 	if section == "done" || section == "all" {
 		issues, err := s.client.RecentlyDone(ctx, s.cfg.DoneWindow)

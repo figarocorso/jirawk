@@ -19,9 +19,10 @@ func Run(cfg *config.Config, client jira.Client, interval time.Duration) error {
 	return err
 }
 
-// fetchMsg is delivered when a background fetch of both sections completes.
+// fetchMsg is delivered when a background fetch of all sections completes.
 type fetchMsg struct {
 	inProgress []jira.Issue
+	open       []jira.Issue
 	done       []jira.Issue
 	err        error
 }
@@ -32,7 +33,7 @@ type usageMsg struct {
 	err   error
 }
 
-// fetchCmd fetches both sections concurrently.
+// fetchCmd fetches all sections concurrently.
 func fetchCmd(cfg *config.Config, client jira.Client) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -41,21 +42,30 @@ func fetchCmd(cfg *config.Config, client jira.Client) tea.Cmd {
 			err    error
 		}
 		ipCh := make(chan res, 1)
+		openCh := make(chan res, 1)
 		doneCh := make(chan res, 1)
 		go func() {
 			i, err := client.InProgress(ctx)
 			ipCh <- res{i, err}
 		}()
 		go func() {
+			i, err := client.Open(ctx)
+			openCh <- res{i, err}
+		}()
+		go func() {
 			i, err := client.RecentlyDone(ctx, cfg.DoneWindow)
 			doneCh <- res{i, err}
 		}()
 		ip := <-ipCh
+		op := <-openCh
 		dn := <-doneCh
-		msg := fetchMsg{inProgress: ip.issues, done: dn.issues}
-		if ip.err != nil {
+		msg := fetchMsg{inProgress: ip.issues, open: op.issues, done: dn.issues}
+		switch {
+		case ip.err != nil:
 			msg.err = ip.err
-		} else if dn.err != nil {
+		case op.err != nil:
+			msg.err = op.err
+		case dn.err != nil:
 			msg.err = dn.err
 		}
 		return msg

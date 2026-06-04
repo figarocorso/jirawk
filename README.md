@@ -4,18 +4,22 @@
 
 `jirawk` (jira-hawk) is a single-binary CLI + TUI for keeping tabs on the Jira
 issues assigned to you. It needs no tracked list — everything is derived live
-from JQL through [`jira-cli`][jira-cli]. Two things at a glance:
+from JQL through [`jira-cli`][jira-cli]. The TUI has **three tabs** you flip
+between with ←/→ (or vim `h`/`l`):
 
-- the issues you have **in progress** (across every project), and
-- the issues you **closed in the last 24 hours**.
+- **In progress** — sorted oldest-first by age (the ▲ on the Age header marks
+  the sort), so the most stale work floats to the top.
+- **Open** — your not-yet-started issues, newest first.
+- **Closed** — issues you've resolved in the last 30 days, newest first.
 
 Run `jirawk stats` for an in-progress count plus an 8-week bar chart of how many
 issues you've resolved per week.
 
 ## Features
 
-- Interactive Bubble Tea TUI: two stacked tables (in progress / recently
-  closed), `tab` to switch focus, `enter` to open an issue in the browser.
+- Interactive Bubble Tea TUI with three tabs (in progress / open / closed),
+  ←/→ or `h`/`l` to switch, `enter` to open an issue in the browser. A scroll
+  indicator shows how many issues sit above/below the current selection.
 - One-shot non-interactive `jirawk list` (use `--json` for agents).
 - `jirawk stats` — in-progress count + weekly resolved bar chart.
 - `jirawk watch` — TUI with periodic auto-refresh.
@@ -68,11 +72,12 @@ sudo mv jirawk /usr/local/bin/jirawk
 ## Usage
 
 ```sh
-jirawk                              # interactive TUI (in progress + closed 24h)
+jirawk                              # interactive TUI (3 tabs: in progress / open / closed)
 jirawk watch [--interval 30s]       # TUI + periodic auto-refresh
-jirawk list                         # both sections as a plain table
-jirawk list --section in-progress   # only in-progress issues
-jirawk list --section done          # only recently-closed issues
+jirawk list                         # all sections as plain tables
+jirawk list --section in-progress   # only in-progress issues (oldest first)
+jirawk list --section open          # only not-started issues (newest first)
+jirawk list --section done          # only recently-closed issues (last 30d)
 jirawk list --json                  # JSON object (agent-friendly)
 jirawk stats                        # in-progress count + weekly closed chart
 jirawk stats --weeks 12             # change the look-back window
@@ -111,8 +116,12 @@ currentUser()` so it spans **all** projects you touch (jira-cli otherwise
 restricts a raw `-q` to its default project). The sections use:
 
 - **in progress** — `statusCategory = "In Progress"`
-- **closed (24h)** — `statusCategory = Done AND resolved >= -24h`
+- **open** — `statusCategory = "To Do"`
+- **closed (30d)** — `statusCategory = Done AND resolved >= -30d`
 - **weekly stats** — one count query per week over the look-back window
+
+Sorting is applied client-side: in-progress by age (oldest first), open by
+creation date (newest first), closed by last update (newest first).
 
 jira-cli's `--raw` output omits the real `statusCategory`, so jirawk derives a
 coarse category (in progress / in review / done / to do / blocked) from the
@@ -128,7 +137,7 @@ jira_bin: jira                          # path to the jira binary
 server: https://acme.atlassian.net      # browse-link base (autodetected from jira-cli)
 in_progress_jql: statusCategory = "In Progress"   # override the in-progress predicate
 refresh_interval: 30s
-done_window: 24h
+done_window: 720h   # 30 days; how far back the "Closed" tab looks
 weeks: 8
 ```
 

@@ -17,7 +17,7 @@ import (
 
 const (
 	defaultRefreshInterval = 30 * time.Second
-	defaultDoneWindow      = 24 * time.Hour
+	defaultDoneWindow      = 30 * 24 * time.Hour
 	defaultWeeks           = 8
 )
 

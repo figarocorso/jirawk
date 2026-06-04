@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -25,25 +26,64 @@ func TestModelRendersSectionsAfterFetch(t *testing.T) {
 	now := time.Now()
 	msg := fetchMsg{
 		inProgress: []jira.Issue{{Key: "OP-1", Summary: "fix", Status: "In Progress", Updated: now}},
+		open:       []jira.Issue{{Key: "OP-3", Summary: "later", Status: "To Do", Created: now}},
 		done:       []jira.Issue{{Key: "OP-2", Summary: "shipped", Status: "Done", Updated: now}},
 	}
 	updated, _ = m.Update(msg)
 	m = updated.(*Model)
 
 	view := m.View()
+	// active tab is in-progress; its rows render, tab bar shows all three counts
 	assert.Contains(t, view, "In progress (1)")
-	assert.Contains(t, view, "OP-1")
+	assert.Contains(t, view, "Open (1)")
 	assert.Contains(t, view, "Closed")
-	assert.Contains(t, view, "OP-2")
+	assert.Contains(t, view, "OP-1")
 	assert.False(t, m.loading)
 }
 
-func TestModelTabSwitchesFocus(t *testing.T) {
+func TestModelSortInProgressOldestFirst(t *testing.T) {
 	m := testModel()
-	require.Equal(t, secInProgress, m.focus)
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	now := time.Now()
+	m.handleFetch(fetchMsg{inProgress: []jira.Issue{
+		{Key: "NEW", Status: "In Progress", Updated: now.Add(-time.Hour)},
+		{Key: "OLD", Status: "In Progress", Updated: now.Add(-100 * time.Hour)},
+	}})
+	rows := m.tabs[tabInProgress].rows
+	require.Len(t, rows, 2)
+	assert.Equal(t, "OLD", rows[0].Key, "oldest (most stale) should sort first")
+}
+
+func TestModelTabSwitch(t *testing.T) {
+	m := testModel()
+	require.Equal(t, tabInProgress, m.active)
+	updated, _, _ := m.handleKey("right")
 	m = updated.(*Model)
-	assert.Equal(t, secDone, m.focus)
+	assert.Equal(t, tabOpen, m.active)
+	updated, _, _ = m.handleKey("l")
+	m = updated.(*Model)
+	assert.Equal(t, tabClosed, m.active)
+	// wraps around
+	updated, _, _ = m.handleKey("right")
+	m = updated.(*Model)
+	assert.Equal(t, tabInProgress, m.active)
+	// vim left
+	updated, _, _ = m.handleKey("h")
+	m = updated.(*Model)
+	assert.Equal(t, tabClosed, m.active)
+}
+
+func TestModelScrollIndicator(t *testing.T) {
+	m := testModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 12})
+	m = updated.(*Model)
+	rows := make([]jira.Issue, 20)
+	for i := range rows {
+		rows[i] = jira.Issue{Key: fmt.Sprintf("OP-%d", i), Status: "In Progress"}
+	}
+	m.handleFetch(fetchMsg{inProgress: rows})
+	// cursor at top: only "below" indicator
+	assert.Contains(t, m.renderScroll(), "more below")
+	assert.NotContains(t, m.renderScroll(), "more above")
 }
 
 func TestModelUsageOverlay(t *testing.T) {

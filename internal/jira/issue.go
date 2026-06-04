@@ -33,6 +33,8 @@ type Client interface {
 	// InProgress returns issues assigned to the current user whose status
 	// category is "In Progress".
 	InProgress(ctx context.Context) ([]Issue, error)
+	// Open returns the user's not-yet-started issues (status category "To Do").
+	Open(ctx context.Context) ([]Issue, error)
 	// RecentlyDone returns issues resolved within the given window.
 	RecentlyDone(ctx context.Context, within time.Duration) ([]Issue, error)
 	// WeeklyDone returns per-week resolved counts for the last `weeks` weeks.
@@ -61,6 +63,11 @@ func jqlInProgress(statusClause string) string {
 		statusClause = `statusCategory = "In Progress"`
 	}
 	return fmt.Sprintf("%s AND %s", baseJQL, statusClause)
+}
+
+// jqlNotStarted builds the JQL for the "open / not started" section.
+func jqlNotStarted() string {
+	return fmt.Sprintf(`%s AND statusCategory = "To Do"`, baseJQL)
 }
 
 // jqlDoneWithin builds the JQL for issues resolved within a window like 24h.

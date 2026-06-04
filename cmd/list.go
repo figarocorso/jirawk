@@ -22,7 +22,7 @@ var listCmd = &cobra.Command{
 }
 
 func init() {
-	listCmd.Flags().StringVar(&listSection, "section", "all", "which section to show: in-progress | done | all")
+	listCmd.Flags().StringVar(&listSection, "section", "all", "which section to show: in-progress | open | done | all")
 	listCmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON object instead of a table")
 	rootCmd.AddCommand(listCmd)
 }
@@ -34,35 +34,58 @@ func runList(cmd *cobra.Command, _ []string) error {
 	}
 	ctx := context.Background()
 
-	var inProgress, done []jira.Issue
+	var inProgress, open, done []jira.Issue
 	section := strings.ToLower(listSection)
-	if section == "in-progress" || section == "all" {
-		inProgress, err = client.InProgress(ctx)
-		if err != nil {
-			return err
-		}
+	wantIP := section == "in-progress" || section == "all"
+	wantOpen := section == "open" || section == "all"
+	wantDone := section == "done" || section == "all"
+	if !wantIP && !wantOpen && !wantDone {
+		return fmt.Errorf("invalid --section %q (in-progress|open|done|all)", listSection)
 	}
-	if section == "done" || section == "all" {
-		done, err = client.RecentlyDone(ctx, cfg.DoneWindow)
-		if err != nil {
+	if wantIP {
+		if inProgress, err = client.InProgress(ctx); err != nil {
 			return err
 		}
+		jira.SortByAgeOldestFirst(inProgress)
+	}
+	if wantOpen {
+		if open, err = client.Open(ctx); err != nil {
+			return err
+		}
+		jira.SortByCreatedNewestFirst(open)
+	}
+	if wantDone {
+		if done, err = client.RecentlyDone(ctx, cfg.DoneWindow); err != nil {
+			return err
+		}
+		jira.SortByUpdatedNewestFirst(done)
 	}
 
 	if jsonOut {
-		return emitListJSON(cmd.OutOrStdout(), inProgress, done)
+		return emitListJSON(cmd.OutOrStdout(), inProgress, open, done)
 	}
 
 	out := cmd.OutOrStdout()
 	plain := ui.IsPlain(out)
-	if section == "in-progress" || section == "all" {
-		renderSection(out, plain, "in progress", inProgress)
+	sections := []struct {
+		want  bool
+		title string
+		rows  []jira.Issue
+	}{
+		{wantIP, "in progress", inProgress},
+		{wantOpen, "open", open},
+		{wantDone, fmt.Sprintf("closed · last %s", humanDuration(cfg.DoneWindow)), done},
 	}
-	if section == "all" {
-		fmt.Fprintln(out)
-	}
-	if section == "done" || section == "all" {
-		renderSection(out, plain, fmt.Sprintf("closed · last %s", humanDuration(cfg.DoneWindow)), done)
+	first := true
+	for _, s := range sections {
+		if !s.want {
+			continue
+		}
+		if !first {
+			fmt.Fprintln(out)
+		}
+		first = false
+		renderSection(out, plain, s.title, s.rows)
 	}
 	return nil
 }
@@ -132,9 +155,10 @@ func toJSONIssue(i jira.Issue) jsonIssue {
 	return j
 }
 
-func emitListJSON(out io.Writer, inProgress, done []jira.Issue) error {
+func emitListJSON(out io.Writer, inProgress, open, done []jira.Issue) error {
 	payload := map[string][]jsonIssue{
 		"in_progress": mapIssues(inProgress),
+		"open":        mapIssues(open),
 		"done":        mapIssues(done),
 	}
 	enc := json.NewEncoder(out)
