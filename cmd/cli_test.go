@@ -106,6 +106,12 @@ func TestRenderBar(t *testing.T) {
 	assert.Equal(t, 1, len([]rune(renderBar(1, 1000)))) // clamps to at least 1
 }
 
+func TestClientFactoryPreflightMissingBinary(t *testing.T) {
+	_, err := clientFactory(&config.Config{JiraBin: "jira-definitely-not-installed-xyz"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "jirawk check")
+}
+
 func TestHumanDuration(t *testing.T) {
 	assert.Equal(t, "24h", humanDuration(24*time.Hour))
 	assert.Equal(t, "2d", humanDuration(48*time.Hour))
