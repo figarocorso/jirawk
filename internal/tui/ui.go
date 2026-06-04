@@ -39,10 +39,16 @@ type transitionMsg struct {
 	err error
 }
 
-// transitionCmd moves an issue to the target state in the background.
-func transitionCmd(client jira.Client, key, state string) tea.Cmd {
+// transitionCmd moves an issue to the first reachable state, trying each
+// candidate in order (e.g. "Done", then "Resolved") until one succeeds.
+func transitionCmd(client jira.Client, key string, states ...string) tea.Cmd {
 	return func() tea.Msg {
-		err := client.Transition(context.Background(), key, state)
+		var err error
+		for _, state := range states {
+			if err = client.Transition(context.Background(), key, state); err == nil {
+				return transitionMsg{key: key, err: nil}
+			}
+		}
 		return transitionMsg{key: key, err: err}
 	}
 }

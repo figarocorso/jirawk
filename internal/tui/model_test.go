@@ -179,8 +179,8 @@ func TestModelMoveToDoneConfirmed(t *testing.T) {
 	m := New(cfg, mock)
 	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
 
-	// shift+enter prompts; view shows the confirmation.
-	updated, _, handled := m.handleKey("shift+enter")
+	// d prompts; view shows the confirmation.
+	updated, _, handled := m.handleKey("d")
 	m = updated.(*Model)
 	require.True(t, handled)
 	require.True(t, m.confirmDone)
@@ -203,7 +203,7 @@ func TestModelMoveToDoneConfirmed(t *testing.T) {
 func TestModelMoveToDoneCancelled(t *testing.T) {
 	m := testModel()
 	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
-	updated, _, _ := m.handleKey("shift+enter")
+	updated, _, _ := m.handleKey("d")
 	m = updated.(*Model)
 	require.True(t, m.confirmDone)
 	updated, _, _ = m.handleKey("n")
@@ -214,7 +214,7 @@ func TestModelMoveToDoneCancelled(t *testing.T) {
 func TestModelMoveToDoneOnlyOnInProgressTab(t *testing.T) {
 	m := testModel()
 	m.gotoTab(tabOpen)
-	updated, _, _ := m.handleKey("shift+enter")
+	updated, _, _ := m.handleKey("d")
 	m = updated.(*Model)
 	assert.False(t, m.confirmDone, "Done move should be a no-op outside the In progress tab")
 }
