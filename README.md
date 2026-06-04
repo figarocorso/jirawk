@@ -53,6 +53,12 @@ jira init          # configure jira-cli if you haven't already
 jirawk check
 ```
 
+Upgrade later with:
+
+```sh
+brew upgrade jirawk
+```
+
 ### `go install`
 
 ```sh
