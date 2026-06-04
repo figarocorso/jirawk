@@ -41,8 +41,12 @@ var (
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("212")).
 			BorderTop(false).BorderLeft(false).BorderRight(false).BorderBottom(true)
-	tblCellStyle     = lipgloss.NewStyle().Padding(0, 1)
-	tblSelectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
+	tblCellStyle = lipgloss.NewStyle().Padding(0, 1)
+	// Selected row: subtle bg tint + bold, keeping the age-coloured foreground.
+	// Deliberately avoids green so it never collides with the age gradient.
+	tblSelectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
+	// selMarkerStyle draws the left "▶" cursor marker on the selected row.
+	selMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Background(lipgloss.Color("237")).Bold(true)
 )
 
 // statusEmojiLabel returns an emoji-prefixed status name (no ANSI, so the
@@ -115,8 +119,12 @@ type Model struct {
 	pendingDone jira.Issue
 }
 
-// doneState is the target status name used when transitioning an issue to Done.
+// doneState is the display name for the Done transition.
 const doneState = "Done"
+
+// doneStates are the target status names tried in order when moving an issue to
+// Done. Workflows vary: some boards use "Done", others "Resolved".
+var doneStates = []string{"Done", "Resolved"}
 
 // SetRefreshInterval enables watch-style auto-refresh. Non-positive disables it.
 func (m *Model) SetRefreshInterval(d time.Duration) {
@@ -283,7 +291,7 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 		return m.refresh()
 	case "enter":
 		return m, m.primaryAction(), true
-	case "shift+enter", "d":
+	case "d":
 		return m.promptDone()
 	case "c":
 		m.copySelected()
@@ -320,7 +328,7 @@ func (m *Model) handleDoneConfirm(key string) (tea.Model, tea.Cmd, bool) {
 		m.pendingDone = jira.Issue{}
 		m.loading = true
 		m.status = fmt.Sprintf("Moving %s to %s…", issue.Key, doneState)
-		return m, tea.Batch(m.spinner.Tick, transitionCmd(m.client, issue.Key, doneState)), true
+		return m, tea.Batch(m.spinner.Tick, transitionCmd(m.client, issue.Key, doneStates...)), true
 	case "n", "N", "esc", "q", "ctrl+c":
 		m.confirmDone = false
 		m.pendingDone = jira.Issue{}
@@ -785,14 +793,15 @@ func (m *Model) renderColoredTable(kind tabKind) string {
 	now := time.Now()
 
 	lines := make([]string, 0, h+1)
-	lines = append(lines, cellsToRow(titles, tblHeaderStyle))
+	lines = append(lines, "  "+cellsToRow(titles, tblHeaderStyle))
 	for idx := start; idx < end; idx++ {
 		issue := t.rows[idx]
+		age := ageColor(kind, issue, now)
 		row := cellsToRow(issueCells(issue), tblCellStyle)
 		if idx == cursor {
-			row = tblSelectedStyle.Render(row)
+			row = selMarkerStyle.Render("▶ ") + tblSelectedStyle.Foreground(age).Render(row)
 		} else {
-			row = lipgloss.NewStyle().Foreground(ageColor(kind, issue, now)).Render(row)
+			row = "  " + lipgloss.NewStyle().Foreground(age).Render(row)
 		}
 		lines = append(lines, row)
 	}
