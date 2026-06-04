@@ -27,9 +27,9 @@ var (
 	hintStyle    = lipgloss.NewStyle().Faint(true)
 	barStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 	scrollStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
-	tabActive    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("212")).Padding(0, 1)
-	tabInactive  = lipgloss.NewStyle().Faint(true).Padding(0, 1)
-	tabSeparator = lipgloss.NewStyle().Faint(true)
+	tabActive    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("212")).Padding(0, 1)
+	tabInactive  = lipgloss.NewStyle().Foreground(lipgloss.Color("251")).Background(lipgloss.Color("237")).Padding(0, 1)
+	tabSeparator = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	// Shared table styles, used both to seed the bubbles table (cursor/layout
 	// state) and by renderColoredTable, which draws the rows itself so it can
