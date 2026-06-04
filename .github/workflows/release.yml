@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # goreleaser-action@v6 still bundles Node 20; force JS actions onto Node 24.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
