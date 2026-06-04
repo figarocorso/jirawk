@@ -1,0 +1,84 @@
+version: 2
+
+project_name: jirawk
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: jirawk
+    main: .
+    binary: jirawk
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{- .Os }}_{{- .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+brews:
+  - name: jirawk
+    repository:
+      owner: figarocorso
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/figarocorso/jirawk"
+    description: "🦅 Keep watch over your in-progress and recently-closed Jira issues from the terminal."
+    license: "Apache-2.0"
+    commit_author:
+      name: figarocorso
+      email: figarocorso@users.noreply.github.com
+    directory: Formula
+    dependencies:
+      - name: ankitpokhrel/jira-cli/jira-cli
+    install: |
+      bin.install "jirawk"
+    test: |
+      system "#{bin}/jirawk", "--help"
+
+release:
+  draft: false
+  prerelease: auto
+  github:
+    owner: figarocorso
+    name: jirawk

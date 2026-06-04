@@ -1,0 +1,24 @@
+# OS / filesystem cruft
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.claude/
+
+# Local planning notes (not for sharing)
+TODO.md
+IDEAS.md
+
+# Go build artifacts
+/jirawk
+/dist/
+coverage.out
+coverage.html
+coverage.txt
+*.test
+*.prof
