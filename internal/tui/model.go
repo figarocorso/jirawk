@@ -283,7 +283,7 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 		return m.refresh()
 	case "enter":
 		return m, m.primaryAction(), true
-	case "shift+enter":
+	case "shift+enter", "d":
 		return m.promptDone()
 	case "c":
 		m.copySelected()
@@ -295,8 +295,8 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 // promptDone opens the y/N confirmation to move the selected in-progress issue
 // to Done. It is a no-op outside the In progress tab.
 func (m *Model) promptDone() (tea.Model, tea.Cmd, bool) {
-	if m.active != tabInProgress {
-		m.status = "Move to Done only available on the In progress tab"
+	if m.active != tabInProgress && m.active != tabOpen {
+		m.status = "Move to Done only available on the In progress and Open tabs"
 		return m, nil, true
 	}
 	cur := &m.tabs[m.active]
@@ -625,7 +625,7 @@ func (m *Model) View() string {
 
 	switch {
 	case m.confirmDone:
-		b.WriteString(errStyle.Render(fmt.Sprintf("🟣 Move %s to %s? [y/N]", m.pendingDone.Key, doneState)))
+		b.WriteString(errStyle.Render(fmt.Sprintf("🟣 Move %s to %s? [Y/n]", m.pendingDone.Key, doneState)))
 	case m.palette:
 		b.WriteString(keyStyle.Render("/"+m.paletteInput+"▌") +
 			hintStyle.Render("   (commands: usage · esc cancels)"))
@@ -679,8 +679,8 @@ func (m *Model) renderHints() string {
 		keyStyle.Render("↑↓/jk") + hintStyle.Render(" nav"),
 		keyStyle.Render("⏎") + hintStyle.Render(" open"),
 	}
-	if m.active == tabInProgress {
-		hints = append(hints, keyStyle.Render("⇧⏎")+hintStyle.Render(" done"))
+	if m.active == tabInProgress || m.active == tabOpen {
+		hints = append(hints, keyStyle.Render("d")+hintStyle.Render(" done"))
 	}
 	hints = append(hints,
 		keyStyle.Render("c")+hintStyle.Render(" copy"),
