@@ -173,6 +173,32 @@ func TestModelEpicsChainAfterInProgress(t *testing.T) {
 	assert.Contains(t, m.View(), "Epics (1)")
 }
 
+func TestModelEpicsRemovedFromInProgress(t *testing.T) {
+	// OP-288 is in progress AND an ancestor of OP-294; it must end up only in the
+	// Epics tab, not duplicated in In progress.
+	mock := jira.NewMockClient()
+	mock.EpicIssues = []jira.Issue{{Key: "OP-288", Type: "Initiative"}}
+	cfg := &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4}
+	m := New(cfg, mock)
+
+	cmd := m.handleInProgress(inProgressMsg{issues: []jira.Issue{
+		{Key: "OP-294", Parent: "OP-288", Status: "In Progress"},
+		{Key: "OP-288", Type: "Initiative", Status: "In Progress"},
+	}})
+	require.NotNil(t, cmd)
+	// Before epics land, the epic still shows in In progress.
+	require.Len(t, m.tabs[tabInProgress].rows, 2)
+
+	em, ok := cmd().(epicsMsg)
+	require.True(t, ok)
+	m = feed(m, em)
+
+	ipKeys := keySet(m.tabs[tabInProgress].rows)
+	assert.False(t, ipKeys["OP-288"], "epic must leave In progress")
+	assert.True(t, ipKeys["OP-294"], "non-epic child stays in In progress")
+	assert.True(t, keySet(m.tabs[tabEpics].rows)["OP-288"], "epic shows in Epics")
+}
+
 func TestModelPaletteUsageCommand(t *testing.T) {
 	m := testModel()
 	// "/" opens the palette.

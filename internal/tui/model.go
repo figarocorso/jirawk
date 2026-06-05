@@ -510,7 +510,10 @@ func (m *Model) handleInProgress(msg inProgressMsg) tea.Cmd {
 	return epicsCmd(m.client, msg.issues)
 }
 
-// handleEpics installs the epics rows and chains the open fetch (next tab).
+// handleEpics installs the epics rows and chains the open fetch (next tab). An
+// in-progress issue can itself be an epic/initiative that parents other
+// in-progress work, so it surfaces in both lists; once it shows in Epics we drop
+// it from In progress to avoid the duplicate.
 func (m *Model) handleEpics(msg epicsMsg) tea.Cmd {
 	m.tabs[tabEpics].loading = false
 	if msg.err != nil {
@@ -518,9 +521,30 @@ func (m *Model) handleEpics(msg epicsMsg) tea.Cmd {
 	} else {
 		jira.SortByUpdatedNewestFirst(msg.issues)
 		m.applySection(tabEpics, msg.issues)
+		m.applySection(tabInProgress, withoutKeys(m.tabs[tabInProgress].rows, keySet(msg.issues)))
 	}
 	m.updateLoadStatus()
 	return openCmd(m.client)
+}
+
+// keySet returns the set of issue keys.
+func keySet(issues []jira.Issue) map[string]bool {
+	s := make(map[string]bool, len(issues))
+	for _, i := range issues {
+		s[i.Key] = true
+	}
+	return s
+}
+
+// withoutKeys returns the issues whose key is not in exclude.
+func withoutKeys(issues []jira.Issue, exclude map[string]bool) []jira.Issue {
+	out := make([]jira.Issue, 0, len(issues))
+	for _, i := range issues {
+		if !exclude[i.Key] {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // handleOpen installs the open rows and chains the closed fetch (next tab).
