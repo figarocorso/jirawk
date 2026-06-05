@@ -106,6 +106,9 @@ type rawIssue struct {
 		IssueType struct {
 			Name string `json:"name"`
 		} `json:"issueType"`
+		Parent *struct {
+			Key string `json:"key"`
+		} `json:"parent"`
 		Assignee *struct {
 			DisplayName string `json:"displayName"`
 		} `json:"assignee"`
@@ -168,6 +171,9 @@ func (c *CLIClient) toIssue(r rawIssue) Issue {
 		Labels:   r.Fields.Labels,
 		URL:      BrowseURL(c.server, r.Key),
 	}
+	if r.Fields.Parent != nil {
+		i.Parent = r.Fields.Parent.Key
+	}
 	if r.Fields.Assignee != nil {
 		i.Assignee = r.Fields.Assignee.DisplayName
 	}
@@ -199,6 +205,44 @@ func (c *CLIClient) Open(ctx context.Context) ([]Issue, error) {
 // RecentlyDone fetches issues the user resolved within the given window.
 func (c *CLIClient) RecentlyDone(ctx context.Context, within time.Duration) ([]Issue, error) {
 	return c.query(ctx, jqlDoneWithin(within))
+}
+
+// Ancestors walks the parent chain of seeds upward up to depth levels, querying
+// one batch per level (key IN (...)). It returns the distinct epics/initiatives
+// found, in the order first encountered. Issues already in seen (by key) and
+// non-epic/initiative ancestors are skipped from the result but still walked, so
+// a story whose direct parent is an epic still reaches the initiative above it.
+func (c *CLIClient) Ancestors(ctx context.Context, seeds []Issue, depth int) ([]Issue, error) {
+	seen := make(map[string]bool)
+	var out []Issue
+	frontier := distinctParents(seeds, seen)
+	for level := 0; level < depth && len(frontier) > 0; level++ {
+		batch, err := c.query(ctx, jqlByKeys(frontier))
+		if err != nil {
+			return nil, err
+		}
+		for _, anc := range batch {
+			if IsEpicOrInitiative(anc) {
+				out = append(out, anc)
+			}
+		}
+		frontier = distinctParents(batch, seen)
+	}
+	return out, nil
+}
+
+// distinctParents collects parent keys of issues not yet in seen, marking each
+// returned key as seen so a key is queried at most once across all levels.
+func distinctParents(issues []Issue, seen map[string]bool) []string {
+	var keys []string
+	for _, i := range issues {
+		if i.Parent == "" || seen[i.Parent] {
+			continue
+		}
+		seen[i.Parent] = true
+		keys = append(keys, i.Parent)
+	}
+	return keys
 }
 
 // WeeklyDone returns per-week resolved counts for the last `weeks` weeks,

@@ -26,27 +26,31 @@ func TestModelRendersSectionsAfterFetch(t *testing.T) {
 	m = updated.(*Model)
 
 	now := time.Now()
-	msg := fetchMsg{
-		inProgress: []jira.Issue{{Key: "OP-1", Summary: "fix", Status: "In Progress", Updated: now}},
-		open:       []jira.Issue{{Key: "OP-3", Summary: "later", Status: "To Do", Created: now}},
-		done:       []jira.Issue{{Key: "OP-2", Summary: "shipped", Status: "Done", Updated: now}},
-	}
-	updated, _ = m.Update(msg)
-	m = updated.(*Model)
+	m = feed(m, inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Summary: "fix", Status: "In Progress", Updated: now}}})
+	m = feed(m, openMsg{issues: []jira.Issue{{Key: "OP-3", Summary: "later", Status: "To Do", Created: now}}})
+	m = feed(m, doneMsg{issues: []jira.Issue{{Key: "OP-2", Summary: "shipped", Status: "Done", Updated: now}}})
+	m = feed(m, epicsMsg{issues: []jira.Issue{{Key: "OP-9", Summary: "epic", Type: "Epic", Updated: now}}})
 
 	view := m.View()
-	// active tab is in-progress; its rows render, tab bar shows all three counts
+	// active tab is in-progress; its rows render, tab bar shows every count
 	assert.Contains(t, view, "In progress (1)")
 	assert.Contains(t, view, "Open (1)")
 	assert.Contains(t, view, "Closed")
+	assert.Contains(t, view, "Epics (1)")
 	assert.Contains(t, view, "OP-1")
-	assert.False(t, m.loading)
+	assert.False(t, m.busy(), "all sections loaded → not busy")
+}
+
+// feed routes a section message through Update and returns the updated model.
+func feed(m *Model, msg tea.Msg) *Model {
+	updated, _ := m.Update(msg)
+	return updated.(*Model)
 }
 
 func TestModelSortInProgressOldestFirst(t *testing.T) {
 	m := testModel()
 	now := time.Now()
-	m.handleFetch(fetchMsg{inProgress: []jira.Issue{
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{
 		{Key: "NEW", Status: "In Progress", Updated: now.Add(-time.Hour)},
 		{Key: "OLD", Status: "In Progress", Updated: now.Add(-100 * time.Hour)},
 	}})
@@ -60,6 +64,9 @@ func TestModelTabSwitch(t *testing.T) {
 	require.Equal(t, tabInProgress, m.active)
 	updated, _, _ := m.handleKey("right")
 	m = updated.(*Model)
+	assert.Equal(t, tabEpics, m.active)
+	updated, _, _ = m.handleKey("l")
+	m = updated.(*Model)
 	assert.Equal(t, tabOpen, m.active)
 	updated, _, _ = m.handleKey("l")
 	m = updated.(*Model)
@@ -68,7 +75,7 @@ func TestModelTabSwitch(t *testing.T) {
 	updated, _, _ = m.handleKey("right")
 	m = updated.(*Model)
 	assert.Equal(t, tabInProgress, m.active)
-	// vim left
+	// vim left wraps back to the last tab
 	updated, _, _ = m.handleKey("h")
 	m = updated.(*Model)
 	assert.Equal(t, tabClosed, m.active)
@@ -82,7 +89,7 @@ func TestModelScrollIndicator(t *testing.T) {
 	for i := range rows {
 		rows[i] = jira.Issue{Key: fmt.Sprintf("OP-%d", i), Status: "In Progress"}
 	}
-	m.handleFetch(fetchMsg{inProgress: rows})
+	m.handleInProgress(inProgressMsg{issues: rows})
 	// cursor at top: only "below" indicator
 	assert.Contains(t, m.renderScroll(), "more below")
 	assert.NotContains(t, m.renderScroll(), "more above")
@@ -102,7 +109,7 @@ func TestModelUsageOverlay(t *testing.T) {
 
 func TestModelFetchError(t *testing.T) {
 	m := testModel()
-	m.handleFetch(fetchMsg{err: assertErr{}})
+	m.handleInProgress(inProgressMsg{err: assertErr{}})
 	view := m.View()
 	assert.Contains(t, view, "boom")
 	assert.Contains(t, view, "jirawk check")
@@ -115,11 +122,11 @@ func TestModelPreservesCursorOnRefresh(t *testing.T) {
 		{Key: "OP-2", Status: "In Progress"},
 		{Key: "OP-3", Status: "In Progress"},
 	}
-	m.handleFetch(fetchMsg{inProgress: rows})
+	m.handleInProgress(inProgressMsg{issues: rows})
 	m.tabs[tabInProgress].table.SetCursor(1) // select OP-2
 
 	// Refresh with the list reordered; OP-2 is now last.
-	m.handleFetch(fetchMsg{inProgress: []jira.Issue{
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{
 		{Key: "OP-3", Status: "In Progress"},
 		{Key: "OP-1", Status: "In Progress"},
 		{Key: "OP-2", Status: "In Progress"},
@@ -129,14 +136,67 @@ func TestModelPreservesCursorOnRefresh(t *testing.T) {
 
 func TestModelFollowsSelectionAcrossTabs(t *testing.T) {
 	m := testModel()
-	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
 	require.Equal(t, tabInProgress, m.active)
 	require.Equal(t, "OP-1", m.selectedKeyOf(tabInProgress))
 
-	// OP-1 gets resolved → moves to the closed tab. Active view follows it.
-	m.handleFetch(fetchMsg{done: []jira.Issue{{Key: "OP-1", Status: "Done"}}})
+	// Refresh: OP-1 gets resolved → leaves in-progress, lands in closed. The
+	// active view should follow it across the independently-arriving sections.
+	m.markAllLoading()
+	m.handleInProgress(inProgressMsg{issues: nil})
+	m.handleDone(doneMsg{issues: []jira.Issue{{Key: "OP-1", Status: "Done"}}})
 	assert.Equal(t, tabClosed, m.active)
 	assert.Equal(t, "OP-1", m.selectedKeyOf(tabClosed))
+}
+
+func TestModelEpicsChainAfterInProgress(t *testing.T) {
+	mock := jira.NewMockClient()
+	mock.EpicIssues = []jira.Issue{{Key: "EPIC-1", Type: "Epic", Parent: ""}}
+	cfg := &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4}
+	m := New(cfg, mock)
+
+	// In-progress lands first; its tab is ready while epics is still loading.
+	cmd := m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Parent: "EPIC-1", Status: "In Progress"}}})
+	assert.False(t, m.tabs[tabInProgress].loading, "in-progress ready immediately")
+	assert.True(t, m.tabs[tabEpics].loading, "epics still loading until its fetch returns")
+	require.NotNil(t, cmd, "in-progress handler chains the epics fetch")
+
+	// Running the chained command yields the epics for that in-progress work.
+	msg := cmd()
+	em, ok := msg.(epicsMsg)
+	require.True(t, ok, "chained command produces an epicsMsg")
+	require.NoError(t, em.err)
+
+	m = feed(m, em)
+	assert.False(t, m.tabs[tabEpics].loading)
+	assert.Equal(t, "EPIC-1", m.selectedKeyOf(tabEpics))
+	assert.Contains(t, m.View(), "Epics (1)")
+}
+
+func TestModelEpicsRemovedFromInProgress(t *testing.T) {
+	// OP-288 is in progress AND an ancestor of OP-294; it must end up only in the
+	// Epics tab, not duplicated in In progress.
+	mock := jira.NewMockClient()
+	mock.EpicIssues = []jira.Issue{{Key: "OP-288", Type: "Initiative"}}
+	cfg := &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4}
+	m := New(cfg, mock)
+
+	cmd := m.handleInProgress(inProgressMsg{issues: []jira.Issue{
+		{Key: "OP-294", Parent: "OP-288", Status: "In Progress"},
+		{Key: "OP-288", Type: "Initiative", Status: "In Progress"},
+	}})
+	require.NotNil(t, cmd)
+	// Before epics land, the epic still shows in In progress.
+	require.Len(t, m.tabs[tabInProgress].rows, 2)
+
+	em, ok := cmd().(epicsMsg)
+	require.True(t, ok)
+	m = feed(m, em)
+
+	ipKeys := keySet(m.tabs[tabInProgress].rows)
+	assert.False(t, ipKeys["OP-288"], "epic must leave In progress")
+	assert.True(t, ipKeys["OP-294"], "non-epic child stays in In progress")
+	assert.True(t, keySet(m.tabs[tabEpics].rows)["OP-288"], "epic shows in Epics")
 }
 
 func TestModelPaletteUsageCommand(t *testing.T) {
@@ -177,7 +237,7 @@ func TestModelMoveToDoneConfirmed(t *testing.T) {
 	mock := jira.NewMockClient()
 	cfg := &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4}
 	m := New(cfg, mock)
-	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
 
 	// d prompts; view shows the confirmation.
 	updated, _, handled := m.handleKey("d")
@@ -202,7 +262,7 @@ func TestModelMoveToDoneConfirmed(t *testing.T) {
 
 func TestModelMoveToDoneCancelled(t *testing.T) {
 	m := testModel()
-	m.handleFetch(fetchMsg{inProgress: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
 	updated, _, _ := m.handleKey("d")
 	m = updated.(*Model)
 	require.True(t, m.confirmDone)
@@ -279,7 +339,7 @@ func TestRenderColoredTableEmbedsAnsiAndStaysIntact(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = updated.(*Model)
 	now := time.Now()
-	m.handleFetch(fetchMsg{inProgress: []jira.Issue{
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{
 		{Key: "OP-1", Summary: "fix", Status: "In Progress", Updated: now.Add(-2 * time.Hour)},
 	}})
 	out := m.renderColoredTable(tabInProgress)
@@ -296,7 +356,7 @@ func TestModelScrollWindowFollowsCursor(t *testing.T) {
 	for i := range rows {
 		rows[i] = jira.Issue{Key: fmt.Sprintf("OP-%d", i), Status: "In Progress"}
 	}
-	m.handleFetch(fetchMsg{inProgress: rows})
+	m.handleInProgress(inProgressMsg{issues: rows})
 	m.tabs[tabInProgress].table.SetCursor(40)
 	m.reconcileScroll(tabInProgress)
 	off := m.tabs[tabInProgress].offset

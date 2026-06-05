@@ -19,12 +19,26 @@ func Run(cfg *config.Config, client jira.Client, interval time.Duration) error {
 	return err
 }
 
-// fetchMsg is delivered when a background fetch of all sections completes.
-type fetchMsg struct {
-	inProgress []jira.Issue
-	open       []jira.Issue
-	done       []jira.Issue
-	err        error
+// Per-section fetch messages. Each section loads independently so its tab can
+// render the moment its data arrives, rather than blocking on the slowest query.
+type inProgressMsg struct {
+	issues []jira.Issue
+	err    error
+}
+type openMsg struct {
+	issues []jira.Issue
+	err    error
+}
+type doneMsg struct {
+	issues []jira.Issue
+	err    error
+}
+
+// epicsMsg carries the ancestor epics/initiatives of the in-progress issues. Its
+// fetch is chained after inProgressMsg lands, since it walks their parent chain.
+type epicsMsg struct {
+	issues []jira.Issue
+	err    error
 }
 
 // usageMsg carries the computed stats for the usage overlay.
@@ -53,42 +67,41 @@ func transitionCmd(client jira.Client, key string, states ...string) tea.Cmd {
 	}
 }
 
-// fetchCmd fetches all sections concurrently.
-func fetchCmd(cfg *config.Config, client jira.Client) tea.Cmd {
+// fetchAllCmd starts a refresh by fetching the first tab's section. The
+// remaining sections are chained in tab order (in progress → epics → open →
+// closed) by each section's handler, so they load and render in that order
+// rather than racing in parallel.
+func fetchAllCmd(_ *config.Config, client jira.Client) tea.Cmd {
+	return inProgressCmd(client)
+}
+
+func inProgressCmd(client jira.Client) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		type res struct {
-			issues []jira.Issue
-			err    error
-		}
-		ipCh := make(chan res, 1)
-		openCh := make(chan res, 1)
-		doneCh := make(chan res, 1)
-		go func() {
-			i, err := client.InProgress(ctx)
-			ipCh <- res{i, err}
-		}()
-		go func() {
-			i, err := client.Open(ctx)
-			openCh <- res{i, err}
-		}()
-		go func() {
-			i, err := client.RecentlyDone(ctx, cfg.DoneWindow)
-			doneCh <- res{i, err}
-		}()
-		ip := <-ipCh
-		op := <-openCh
-		dn := <-doneCh
-		msg := fetchMsg{inProgress: ip.issues, open: op.issues, done: dn.issues}
-		switch {
-		case ip.err != nil:
-			msg.err = ip.err
-		case op.err != nil:
-			msg.err = op.err
-		case dn.err != nil:
-			msg.err = dn.err
-		}
-		return msg
+		i, err := client.InProgress(context.Background())
+		return inProgressMsg{issues: i, err: err}
+	}
+}
+
+func openCmd(client jira.Client) tea.Cmd {
+	return func() tea.Msg {
+		i, err := client.Open(context.Background())
+		return openMsg{issues: i, err: err}
+	}
+}
+
+func doneCmd(cfg *config.Config, client jira.Client) tea.Cmd {
+	return func() tea.Msg {
+		i, err := client.RecentlyDone(context.Background(), cfg.DoneWindow)
+		return doneMsg{issues: i, err: err}
+	}
+}
+
+// epicsCmd walks the parent chain of the in-progress seeds up to initiatives
+// (2 levels: story → epic → initiative).
+func epicsCmd(client jira.Client, seeds []jira.Issue) tea.Cmd {
+	return func() tea.Msg {
+		i, err := client.Ancestors(context.Background(), seeds, epicAncestorDepth)
+		return epicsMsg{issues: i, err: err}
 	}
 }
 

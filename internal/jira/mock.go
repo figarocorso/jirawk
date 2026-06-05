@@ -13,6 +13,7 @@ type MockClient struct {
 	InProgressIssues []Issue
 	OpenIssues       []Issue
 	DoneIssues       []Issue // candidates for RecentlyDone / WeeklyDone, with Resolved set
+	EpicIssues       []Issue // ancestor epics/initiatives, looked up by key for Ancestors
 	GetErr           error
 	ListErr          error
 	TransitionErr    error
@@ -68,6 +69,36 @@ func (m *MockClient) RecentlyDone(_ context.Context, within time.Duration) ([]Is
 		if doneAt(i).After(cutoff) {
 			out = append(out, i)
 		}
+	}
+	return out, nil
+}
+
+// Ancestors walks seeds' parent chains up to depth levels against the union of
+// all configured issues, returning distinct epics/initiatives encountered.
+func (m *MockClient) Ancestors(_ context.Context, seeds []Issue, depth int) ([]Issue, error) {
+	if m.ListErr != nil {
+		return nil, m.ListErr
+	}
+	byKey := make(map[string]Issue)
+	for _, set := range [][]Issue{m.InProgressIssues, m.OpenIssues, m.DoneIssues, m.EpicIssues} {
+		for _, i := range set {
+			byKey[i.Key] = i
+		}
+	}
+	seen := make(map[string]bool)
+	frontier := distinctParents(seeds, seen)
+	var out []Issue
+	for level := 0; level < depth && len(frontier) > 0; level++ {
+		var batch []Issue
+		for _, key := range frontier {
+			if anc, ok := byKey[key]; ok {
+				batch = append(batch, anc)
+				if IsEpicOrInitiative(anc) {
+					out = append(out, anc)
+				}
+			}
+		}
+		frontier = distinctParents(batch, seen)
 	}
 	return out, nil
 }
