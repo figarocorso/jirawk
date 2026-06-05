@@ -74,15 +74,20 @@ func statusEmojiLabel(status string) string {
 	return emoji + " " + status
 }
 
-// tabKind enumerates the three views.
+// tabKind enumerates the views.
 type tabKind int
 
 const (
 	tabInProgress tabKind = iota
+	tabEpics
 	tabOpen
 	tabClosed
 	numTabs
 )
+
+// epicAncestorDepth is how far the Epics tab walks up the parent chain:
+// 2 levels covers story → epic → initiative.
+const epicAncestorDepth = 2
 
 // tab holds one view's table, its rows, and presentation metadata.
 type tab struct {
@@ -91,7 +96,8 @@ type tab struct {
 	ageDesc string // header label for the Age column (carries the sort arrow)
 	table   table.Model
 	rows    []jira.Issue
-	offset  int // first visible row index for the custom colored renderer
+	offset  int  // first visible row index for the custom colored renderer
+	loading bool // section fetch in flight; drives the per-tab spinner/empty state
 }
 
 // Model is the Bubble Tea state for jirawk's tabbed TUI.
@@ -117,6 +123,11 @@ type Model struct {
 	// confirmDone gates the in-progress → Done transition behind a y/N prompt.
 	confirmDone bool
 	pendingDone jira.Issue
+
+	// followKey is the active tab's selection at the start of a refresh. If that
+	// issue migrates to another tab (e.g. resolved → Closed), the active view
+	// follows it there once that section's data lands.
+	followKey string
 }
 
 // doneState is the display name for the Done transition.
@@ -160,7 +171,6 @@ func New(cfg *config.Config, client jira.Client) *Model {
 		cfg:     cfg,
 		client:  client,
 		spinner: sp,
-		loading: true,
 		status:  "Loading…",
 		active:  tabInProgress,
 	}
@@ -174,6 +184,7 @@ func New(cfg *config.Config, client jira.Client) *Model {
 		// ordered: In progress climbs oldest-first (▲); Open and Closed lead
 		// with the most recent (▼).
 		{tabInProgress, "In progress", "Age ▲"},
+		{tabEpics, "Epics", "Age ▼"},
 		{tabOpen, "Open", "Age ▼"},
 		{tabClosed, fmt.Sprintf("Closed · %s", humanDuration(cfg.DoneWindow)), "Age ▼"},
 	}
@@ -183,6 +194,7 @@ func New(cfg *config.Config, client jira.Client) *Model {
 			title:   md.title,
 			ageDesc: md.ageDesc,
 			table:   newTable(md.kind == tabInProgress),
+			loading: true,
 		}
 	}
 	return m
@@ -215,7 +227,7 @@ func initialColumns(ageTitle string) []table.Column {
 }
 
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.spinner.Tick, fetchCmd(m.cfg, m.client)}
+	cmds := []tea.Cmd{m.spinner.Tick, fetchAllCmd(m.cfg, m.client)}
 	if tick := m.autoRefreshCmd(); tick != nil {
 		cmds = append(cmds, tick)
 	}
@@ -235,8 +247,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if model, cmd, handled := m.handleKey(msg.String()); handled {
 			return model, cmd
 		}
-	case fetchMsg:
-		m.handleFetch(msg)
+	case inProgressMsg:
+		return m, m.handleInProgress(msg)
+	case epicsMsg:
+		return m, m.handleEpics(msg)
+	case openMsg:
+		return m, m.handleOpen(msg)
+	case doneMsg:
+		m.handleDone(msg)
 		return m, nil
 	case usageMsg:
 		m.handleUsage(msg)
@@ -248,7 +266,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if m.loading {
+		if m.busy() {
 			return m, cmd
 		}
 		return m, nil
@@ -284,8 +302,10 @@ func (m *Model) handleKey(key string) (tea.Model, tea.Cmd, bool) {
 	case "1":
 		return m.gotoTab(tabInProgress), nil, true
 	case "2":
-		return m.gotoTab(tabOpen), nil, true
+		return m.gotoTab(tabEpics), nil, true
 	case "3":
+		return m.gotoTab(tabOpen), nil, true
+	case "4":
 		return m.gotoTab(tabClosed), nil, true
 	case "r", "ctrl+r":
 		return m.refresh()
@@ -347,8 +367,10 @@ func (m *Model) handleTransition(msg transitionMsg) tea.Cmd {
 	}
 	m.err = ""
 	m.status = fmt.Sprintf("Moved %s to %s — refreshing…", msg.key, doneState)
-	// loading is already true; fetch fresh state to reflect the new status.
-	return tea.Batch(m.spinner.Tick, fetchCmd(m.cfg, m.client))
+	// Clear the transition flag and refetch every section to reflect the move.
+	m.loading = false
+	m.markAllLoading()
+	return tea.Batch(m.spinner.Tick, fetchAllCmd(m.cfg, m.client))
 }
 
 // openPalette enters the slash-command line, mirroring prowl's "/usage" UX.
@@ -427,12 +449,21 @@ func (m *Model) gotoTab(k tabKind) *Model {
 }
 
 func (m *Model) refresh() (tea.Model, tea.Cmd, bool) {
-	if m.loading {
+	if m.busy() {
 		return m, nil, false
 	}
-	m.loading = true
+	m.markAllLoading()
 	m.status = "Refreshing…"
-	return m, tea.Batch(m.spinner.Tick, fetchCmd(m.cfg, m.client)), true
+	return m, tea.Batch(m.spinner.Tick, fetchAllCmd(m.cfg, m.client)), true
+}
+
+// markAllLoading flags every tab as fetching ahead of a full refresh and
+// records the active selection so it can be followed if it changes tabs.
+func (m *Model) markAllLoading() {
+	m.followKey = m.selectedKeyOf(m.active)
+	for i := range m.tabs {
+		m.tabs[i].loading = true
+	}
 }
 
 func (m *Model) handleAutoRefresh() tea.Cmd {
@@ -440,65 +471,115 @@ func (m *Model) handleAutoRefresh() tea.Cmd {
 	if next == nil {
 		return nil
 	}
-	if m.loading || m.confirmDone || m.palette {
+	if m.busy() || m.confirmDone || m.palette {
 		return next
 	}
-	m.loading = true
+	m.markAllLoading()
 	m.status = "Auto-refreshing…"
-	return tea.Batch(m.spinner.Tick, fetchCmd(m.cfg, m.client), next)
+	return tea.Batch(m.spinner.Tick, fetchAllCmd(m.cfg, m.client), next)
 }
 
-func (m *Model) handleFetch(msg fetchMsg) {
-	m.loading = false
+// busy reports whether any work is in flight: a non-section op (transition,
+// usage) or any section still fetching. Drives the header spinner.
+func (m *Model) busy() bool {
+	if m.loading {
+		return true
+	}
+	for i := range m.tabs {
+		if m.tabs[i].loading {
+			return true
+		}
+	}
+	return false
+}
+
+// handleInProgress installs the in-progress rows and, on success, chains the
+// epics fetch that walks their parent chain.
+func (m *Model) handleInProgress(msg inProgressMsg) tea.Cmd {
+	m.tabs[tabInProgress].loading = false
+	if msg.err != nil {
+		m.err = msg.err.Error()
+		// Keep the chain alive so open/closed still load; epics has no seeds.
+		return epicsCmd(m.client, nil)
+	}
+	m.err = ""
+	jira.SortByAgeOldestFirst(msg.issues)
+	m.applySection(tabInProgress, msg.issues)
+	m.updateLoadStatus()
+	// Epics depend on the in-progress seeds; fetch them now that we have them.
+	return epicsCmd(m.client, msg.issues)
+}
+
+// handleEpics installs the epics rows and chains the open fetch (next tab).
+func (m *Model) handleEpics(msg epicsMsg) tea.Cmd {
+	m.tabs[tabEpics].loading = false
+	if msg.err != nil {
+		m.err = msg.err.Error()
+	} else {
+		jira.SortByUpdatedNewestFirst(msg.issues)
+		m.applySection(tabEpics, msg.issues)
+	}
+	m.updateLoadStatus()
+	return openCmd(m.client)
+}
+
+// handleOpen installs the open rows and chains the closed fetch (next tab).
+func (m *Model) handleOpen(msg openMsg) tea.Cmd {
+	m.tabs[tabOpen].loading = false
+	if msg.err != nil {
+		m.err = msg.err.Error()
+	} else {
+		jira.SortByCreatedNewestFirst(msg.issues)
+		m.applySection(tabOpen, msg.issues)
+	}
+	m.updateLoadStatus()
+	return doneCmd(m.cfg, m.client)
+}
+
+// handleDone installs the closed rows; it is the last link in the fetch chain.
+func (m *Model) handleDone(msg doneMsg) {
+	m.tabs[tabClosed].loading = false
 	if msg.err != nil {
 		m.err = msg.err.Error()
 		return
 	}
-	m.err = ""
-	// Remember each tab's selection (by issue key) so it survives the refresh.
-	// An issue can also change status and move to another tab between fetches,
-	// so we track the active selection separately to follow it across tabs.
-	var prevKeys [numTabs]string
-	for i := range m.tabs {
-		prevKeys[i] = m.selectedKeyOf(tabKind(i))
-	}
-	activeKey := prevKeys[m.active]
+	jira.SortByUpdatedNewestFirst(msg.issues)
+	m.applySection(tabClosed, msg.issues)
+	m.updateLoadStatus()
+}
 
-	// In progress: oldest (most stale) first. Open: newest created first.
-	// Closed: most recently updated first.
-	jira.SortByAgeOldestFirst(msg.inProgress)
-	jira.SortByCreatedNewestFirst(msg.open)
-	jira.SortByUpdatedNewestFirst(msg.done)
-	m.tabs[tabInProgress].rows = msg.inProgress
-	m.tabs[tabOpen].rows = msg.open
-	m.tabs[tabClosed].rows = msg.done
-	for i := range m.tabs {
-		m.tabs[i].table.SetRows(issuesToRows(m.tabs[i].rows))
-	}
+// applySection swaps one tab's rows in place, preserving its selection by issue
+// key and re-laying out columns (widths are shared across all tabs).
+func (m *Model) applySection(kind tabKind, issues []jira.Issue) {
+	prevKey := m.selectedKeyOf(kind)
+	m.tabs[kind].rows = issues
+	m.tabs[kind].table.SetRows(issuesToRows(issues))
 	m.layoutTables()
-	// Restore each tab's cursor to wherever its previously-selected issue landed.
-	for i := range m.tabs {
-		if idx := indexOfKey(m.tabs[i].rows, prevKeys[i]); idx >= 0 {
-			m.tabs[i].table.SetCursor(idx)
+	if idx := indexOfKey(issues, prevKey); idx >= 0 {
+		m.tabs[kind].table.SetCursor(idx)
+	}
+	// If the active selection left its tab and resurfaced here, follow it.
+	if m.followKey != "" && kind != m.active &&
+		indexOfKey(m.tabs[m.active].rows, m.followKey) < 0 {
+		if idx := indexOfKey(issues, m.followKey); idx >= 0 {
+			m.tabs[m.active].table.Blur()
+			m.active = kind
+			m.tabs[m.active].table.Focus()
+			m.tabs[m.active].table.SetCursor(idx)
 		}
 	}
-	// If the active selection moved out of the active tab, follow it.
-	if activeKey != "" && indexOfKey(m.tabs[m.active].rows, activeKey) < 0 {
-		for i := range m.tabs {
-			if idx := indexOfKey(m.tabs[i].rows, activeKey); idx >= 0 {
-				m.tabs[m.active].table.Blur()
-				m.active = tabKind(i)
-				m.tabs[m.active].table.Focus()
-				m.tabs[m.active].table.SetCursor(idx)
-				break
-			}
-		}
+	m.reconcileScroll(kind)
+}
+
+// updateLoadStatus summarises loaded sections, marking those still in flight.
+func (m *Model) updateLoadStatus() {
+	if m.busy() {
+		m.status = "Loading…"
+		return
 	}
-	for i := range m.tabs {
-		m.reconcileScroll(tabKind(i))
-	}
-	m.status = fmt.Sprintf("%d in progress · %d open · %d closed",
-		len(msg.inProgress), len(msg.open), len(msg.done))
+	m.status = fmt.Sprintf("%d in progress · %d epics · %d open · %d closed",
+		len(m.tabs[tabInProgress].rows), len(m.tabs[tabEpics].rows),
+		len(m.tabs[tabOpen].rows), len(m.tabs[tabClosed].rows))
 }
 
 func (m *Model) handleUsage(msg usageMsg) {
@@ -602,7 +683,7 @@ func (m *Model) View() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("🦅 jirawk"))
 	b.WriteString("  ")
-	if m.loading {
+	if m.busy() {
 		b.WriteString(m.spinner.View())
 		b.WriteString(" ")
 	}
@@ -623,7 +704,7 @@ func (m *Model) View() string {
 	b.WriteString("\n" + m.renderTabBar() + "\n\n")
 
 	cur := &m.tabs[m.active]
-	if len(cur.rows) == 0 && !m.loading {
+	if len(cur.rows) == 0 && !cur.loading {
 		b.WriteString(hintStyle.Render("    — none —") + "\n")
 	} else {
 		b.WriteString(m.renderColoredTable(m.active) + "\n")
@@ -704,7 +785,7 @@ func (m *Model) renderHints() string {
 // the browser"; kept as a per-view switch so views can diverge later.
 func (m *Model) primaryAction() tea.Cmd {
 	switch m.active {
-	case tabInProgress, tabOpen, tabClosed:
+	case tabInProgress, tabOpen, tabClosed, tabEpics:
 		if url := m.selectedURL(); url != "" {
 			_ = openInBrowser(url)
 		}
@@ -859,6 +940,13 @@ func ageColor(kind tabKind, i jira.Issue, now time.Time) lipgloss.Color {
 			max   float64
 			color string
 		}{{2, "39"}, {7, "75"}, {14, "141"}, {30, "170"}, {1e9, "201"}}
+	case tabEpics:
+		// Violet ramp by last-update recency. Deliberately never bottoms out in
+		// grey so the foreground stays readable on the grey selected-row bg.
+		ramp = []struct {
+			max   float64
+			color string
+		}{{7, "213"}, {30, "177"}, {90, "141"}, {180, "98"}, {1e9, "97"}}
 	default: // tabClosed
 		ramp = []struct {
 			max   float64

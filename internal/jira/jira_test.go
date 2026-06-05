@@ -137,6 +137,68 @@ func TestWeeklyDoneRunsPerBucket(t *testing.T) {
 	assert.Equal(t, 3, got)
 }
 
+func TestCLIAncestorsWalksTwoLevels(t *testing.T) {
+	// Two-level chain: story OP-1 → epic EPIC-1 → initiative INIT-1. The runner
+	// answers each `key IN (...)` batch by the keys requested.
+	var queries []string
+	c := NewCLIClient(WithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		jql := ""
+		for i, a := range args {
+			if a == "-q" && i+1 < len(args) {
+				jql = args[i+1]
+			}
+		}
+		queries = append(queries, jql)
+		switch {
+		case strings.Contains(jql, "EPIC-1"):
+			return []byte(`[{"key":"EPIC-1","fields":{"issueType":{"name":"Epic"},"parent":{"key":"INIT-1"},"status":{"name":"In Progress"}}}]`), nil
+		case strings.Contains(jql, "INIT-1"):
+			return []byte(`[{"key":"INIT-1","fields":{"issueType":{"name":"Initiative"},"status":{"name":"To Do"}}}]`), nil
+		}
+		return []byte(`[]`), nil
+	}))
+
+	seeds := []Issue{{Key: "OP-1", Parent: "EPIC-1"}}
+	anc, err := c.Ancestors(context.Background(), seeds, 2)
+	require.NoError(t, err)
+	require.Len(t, anc, 2)
+	assert.Equal(t, "EPIC-1", anc[0].Key)
+	assert.Equal(t, "INIT-1", anc[1].Key)
+	// One batch query per level.
+	require.Len(t, queries, 2)
+	assert.Contains(t, queries[0], "key IN (EPIC-1)")
+	assert.Contains(t, queries[1], "key IN (INIT-1)")
+}
+
+func TestCLIAncestorsDedupesAndStopsAtDepth(t *testing.T) {
+	var queries int
+	c := NewCLIClient(WithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		queries++
+		// Every parent resolves to the same epic, which itself has no parent.
+		return []byte(`[{"key":"EPIC-1","fields":{"issueType":{"name":"Epic"},"status":{"name":"In Progress"}}}]`), nil
+	}))
+	seeds := []Issue{{Key: "OP-1", Parent: "EPIC-1"}, {Key: "OP-2", Parent: "EPIC-1"}}
+	anc, err := c.Ancestors(context.Background(), seeds, 2)
+	require.NoError(t, err)
+	// EPIC-1 appears once despite two seeds pointing at it; no parent → 1 query.
+	require.Len(t, anc, 1)
+	assert.Equal(t, "EPIC-1", anc[0].Key)
+	assert.Equal(t, 1, queries)
+}
+
+func TestMockAncestors(t *testing.T) {
+	m := NewMockClient()
+	m.EpicIssues = []Issue{
+		{Key: "EPIC-1", Type: "Epic", Parent: "INIT-1"},
+		{Key: "INIT-1", Type: "Initiative"},
+	}
+	anc, err := m.Ancestors(context.Background(), []Issue{{Key: "OP-1", Parent: "EPIC-1"}}, 2)
+	require.NoError(t, err)
+	require.Len(t, anc, 2)
+	assert.Equal(t, "EPIC-1", anc[0].Key)
+	assert.Equal(t, "INIT-1", anc[1].Key)
+}
+
 func TestComputeStats(t *testing.T) {
 	m := NewMockClient()
 	now := time.Now()
