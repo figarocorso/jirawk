@@ -511,21 +511,37 @@ func (m *Model) handleInProgress(msg inProgressMsg) tea.Cmd {
 	return epicsCmd(m.client, msg.issues)
 }
 
-// handleEpics installs the epics rows and chains the open fetch (next tab). An
-// in-progress issue can itself be an epic/initiative that parents other
-// in-progress work, so it surfaces in both lists; once it shows in Epics we drop
-// it from In progress to avoid the duplicate.
+// handleEpics installs the epics rows and chains the open fetch (next tab).
+// msg.issues holds epics/initiatives discovered by walking the parent chain of
+// the in-progress seeds. A seed can also be an epic/initiative itself (Ancestors
+// classifies parents, never the seeds), so we fold those in too. Anything that
+// lands in Epics is dropped from In progress to avoid the duplicate.
 func (m *Model) handleEpics(msg epicsMsg) tea.Cmd {
 	m.tabs[tabEpics].loading = false
 	if msg.err != nil {
 		m.err = msg.err.Error()
 	} else {
-		jira.SortByUpdatedNewestFirst(msg.issues)
-		m.applySection(tabEpics, msg.issues)
-		m.applySection(tabInProgress, withoutKeys(m.tabs[tabInProgress].rows, keySet(msg.issues)))
+		epics := mergeSelfEpics(msg.issues, m.tabs[tabInProgress].rows)
+		jira.SortByUpdatedNewestFirst(epics)
+		m.applySection(tabEpics, epics)
+		m.applySection(tabInProgress, withoutKeys(m.tabs[tabInProgress].rows, keySet(epics)))
 	}
 	m.updateLoadStatus()
 	return openCmd(m.client)
+}
+
+// mergeSelfEpics appends in-progress seeds that are themselves epics/initiatives
+// to the ancestor epics, skipping keys already present.
+func mergeSelfEpics(ancestors, inProgress []jira.Issue) []jira.Issue {
+	seen := keySet(ancestors)
+	out := ancestors
+	for _, i := range inProgress {
+		if !seen[i.Key] && jira.IsEpicOrInitiative(i) {
+			out = append(out, i)
+			seen[i.Key] = true
+		}
+	}
+	return out
 }
 
 // keySet returns the set of issue keys.
