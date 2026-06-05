@@ -134,8 +134,9 @@ type Model struct {
 const doneState = "Done"
 
 // doneStates are the target status names tried in order when moving an issue to
-// Done. Workflows vary: some boards use "Done", others "Resolved".
-var doneStates = []string{"Done", "Resolved"}
+// Done. Workflows vary: some boards use a "Done"/"Resolved" status, others
+// expose verb-style transitions like "Resolve"/"Close".
+var doneStates = []string{"Done", "Resolved", "Resolve", "Close", "Closed"}
 
 // SetRefreshInterval enables watch-style auto-refresh. Non-positive disables it.
 func (m *Model) SetRefreshInterval(d time.Duration) {
