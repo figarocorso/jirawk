@@ -186,8 +186,9 @@ func TestModelEpicsRemovedFromInProgress(t *testing.T) {
 		{Key: "PROJ-288", Type: "Initiative", Status: "In Progress"},
 	}})
 	require.NotNil(t, cmd)
-	// Before epics land, the epic still shows in In progress.
-	require.Len(t, m.tabs[tabInProgress].rows, 2)
+	// The epic is filtered out of In progress immediately, so it never flashes in.
+	require.Len(t, m.tabs[tabInProgress].rows, 1)
+	require.False(t, keySet(m.tabs[tabInProgress].rows)["PROJ-288"], "epic never shows in In progress")
 
 	em, ok := cmd().(epicsMsg)
 	require.True(t, ok)
