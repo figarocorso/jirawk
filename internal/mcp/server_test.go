@@ -17,8 +17,8 @@ import (
 func newTestServer(in string) (*Server, *bytes.Buffer) {
 	now := time.Now()
 	m := jira.NewMockClient()
-	m.InProgressIssues = []jira.Issue{{Key: "OP-1", Summary: "a", Status: "In Progress"}}
-	m.DoneIssues = []jira.Issue{{Key: "OP-2", Summary: "b", Status: "Done", Resolved: now.Add(-2 * time.Hour), Updated: now.Add(-2 * time.Hour)}}
+	m.InProgressIssues = []jira.Issue{{Key: "PROJ-1", Summary: "a", Status: "In Progress"}}
+	m.DoneIssues = []jira.Issue{{Key: "PROJ-2", Summary: "b", Status: "Done", Resolved: now.Add(-2 * time.Hour), Updated: now.Add(-2 * time.Hour)}}
 	var out bytes.Buffer
 	s := NewServer(Options{
 		Config: &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4},
@@ -71,8 +71,8 @@ func TestToolCallListIssues(t *testing.T) {
 	msgs := decodeResponses(t, out.String())
 	require.Len(t, msgs, 1)
 	text := msgs[0]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	assert.Contains(t, text, "OP-1")
-	assert.Contains(t, text, "OP-2")
+	assert.Contains(t, text, "PROJ-1")
+	assert.Contains(t, text, "PROJ-2")
 }
 
 func TestToolCallStats(t *testing.T) {
