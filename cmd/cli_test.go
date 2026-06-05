@@ -39,15 +39,15 @@ func sampleMock() *jira.MockClient {
 	now := time.Now()
 	m := jira.NewMockClient()
 	m.InProgressIssues = []jira.Issue{
-		{Key: "OP-1", Summary: "fix thing", Status: "In Progress", Priority: "High", Updated: now.Add(-2 * time.Hour), URL: "https://x/browse/OP-1"},
-		{Key: "QA-9", Summary: "test thing", Status: "In Review", Priority: "Medium", Updated: now.Add(-26 * time.Hour)},
+		{Key: "PROJ-1", Summary: "fix thing", Status: "In Progress", Priority: "High", Updated: now.Add(-2 * time.Hour), URL: "https://x/browse/PROJ-1"},
+		{Key: "PROJ-9", Summary: "test thing", Status: "In Review", Priority: "Medium", Updated: now.Add(-26 * time.Hour)},
 	}
 	m.OpenIssues = []jira.Issue{
-		{Key: "OP-7", Summary: "todo thing", Status: "To Do", Priority: "Low", Created: now.Add(-time.Hour)},
+		{Key: "PROJ-7", Summary: "todo thing", Status: "To Do", Priority: "Low", Created: now.Add(-time.Hour)},
 	}
 	m.DoneIssues = []jira.Issue{
-		{Key: "OP-2", Summary: "done thing", Status: "Resolved", Priority: "Low", Resolved: now.Add(-3 * time.Hour), Updated: now.Add(-3 * time.Hour)},
-		{Key: "OP-3", Summary: "old thing", Status: "Done", Resolved: now.Add(-20 * 24 * time.Hour), Updated: now.Add(-20 * 24 * time.Hour)},
+		{Key: "PROJ-2", Summary: "done thing", Status: "Resolved", Priority: "Low", Resolved: now.Add(-3 * time.Hour), Updated: now.Add(-3 * time.Hour)},
+		{Key: "PROJ-3", Summary: "old thing", Status: "Done", Resolved: now.Add(-20 * 24 * time.Hour), Updated: now.Add(-20 * 24 * time.Hour)},
 	}
 	return m
 }
@@ -56,21 +56,21 @@ func TestListAll(t *testing.T) {
 	withMock(t, sampleMock())
 	out := run(t, "list", "--section", "all")
 	assert.Contains(t, out, "in progress (2)")
-	assert.Contains(t, out, "OP-1")
-	assert.Contains(t, out, "QA-9")
+	assert.Contains(t, out, "PROJ-1")
+	assert.Contains(t, out, "PROJ-9")
 	assert.Contains(t, out, "open (1)")
-	assert.Contains(t, out, "OP-7")
+	assert.Contains(t, out, "PROJ-7")
 	assert.Contains(t, out, "closed")
-	assert.Contains(t, out, "OP-2") // resolved within window
-	assert.Contains(t, out, "OP-3") // resolved 20d ago, within new 30d window
+	assert.Contains(t, out, "PROJ-2") // resolved within window
+	assert.Contains(t, out, "PROJ-3") // resolved 20d ago, within new 30d window
 }
 
 func TestListOpenSection(t *testing.T) {
 	withMock(t, sampleMock())
 	out := run(t, "list", "--section", "open")
 	assert.Contains(t, out, "open (1)")
-	assert.Contains(t, out, "OP-7")
-	assert.NotContains(t, out, "OP-1")
+	assert.Contains(t, out, "PROJ-7")
+	assert.NotContains(t, out, "PROJ-1")
 }
 
 func TestListJSON(t *testing.T) {
@@ -78,14 +78,14 @@ func TestListJSON(t *testing.T) {
 	out := run(t, "list", "--json")
 	assert.Contains(t, out, `"in_progress"`)
 	assert.Contains(t, out, `"done"`)
-	assert.Contains(t, out, `"OP-1"`)
+	assert.Contains(t, out, `"PROJ-1"`)
 	assert.Contains(t, out, `"category": "in progress"`)
 }
 
 func TestGet(t *testing.T) {
 	withMock(t, sampleMock())
-	out := run(t, "get", "OP-1")
-	assert.Contains(t, out, "OP-1")
+	out := run(t, "get", "PROJ-1")
+	assert.Contains(t, out, "PROJ-1")
 	assert.Contains(t, out, "fix thing")
 	assert.Contains(t, out, "High")
 }
@@ -95,7 +95,7 @@ func TestStats(t *testing.T) {
 	out := run(t, "stats", "--weeks", "4")
 	assert.Contains(t, out, "in progress : 2")
 	assert.Contains(t, out, "closed — last 4 weeks")
-	// OP-2 in week 0, OP-3 in week 2 → total 2 within 4-week window.
+	// PROJ-2 in week 0, PROJ-3 in week 2 → total 2 within 4-week window.
 	assert.Contains(t, out, "(2 total)")
 }
 

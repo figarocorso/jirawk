@@ -26,10 +26,10 @@ func TestModelRendersSectionsAfterFetch(t *testing.T) {
 	m = updated.(*Model)
 
 	now := time.Now()
-	m = feed(m, inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Summary: "fix", Status: "In Progress", Updated: now}}})
-	m = feed(m, openMsg{issues: []jira.Issue{{Key: "OP-3", Summary: "later", Status: "To Do", Created: now}}})
-	m = feed(m, doneMsg{issues: []jira.Issue{{Key: "OP-2", Summary: "shipped", Status: "Done", Updated: now}}})
-	m = feed(m, epicsMsg{issues: []jira.Issue{{Key: "OP-9", Summary: "epic", Type: "Epic", Updated: now}}})
+	m = feed(m, inProgressMsg{issues: []jira.Issue{{Key: "PROJ-1", Summary: "fix", Status: "In Progress", Updated: now}}})
+	m = feed(m, openMsg{issues: []jira.Issue{{Key: "PROJ-3", Summary: "later", Status: "To Do", Created: now}}})
+	m = feed(m, doneMsg{issues: []jira.Issue{{Key: "PROJ-2", Summary: "shipped", Status: "Done", Updated: now}}})
+	m = feed(m, epicsMsg{issues: []jira.Issue{{Key: "PROJ-9", Summary: "epic", Type: "Epic", Updated: now}}})
 
 	view := m.View()
 	// active tab is in-progress; its rows render, tab bar shows every count
@@ -37,7 +37,7 @@ func TestModelRendersSectionsAfterFetch(t *testing.T) {
 	assert.Contains(t, view, "Open (1)")
 	assert.Contains(t, view, "Closed")
 	assert.Contains(t, view, "Epics (1)")
-	assert.Contains(t, view, "OP-1")
+	assert.Contains(t, view, "PROJ-1")
 	assert.False(t, m.busy(), "all sections loaded → not busy")
 }
 
@@ -118,35 +118,35 @@ func TestModelFetchError(t *testing.T) {
 func TestModelPreservesCursorOnRefresh(t *testing.T) {
 	m := testModel()
 	rows := []jira.Issue{
-		{Key: "OP-1", Status: "In Progress"},
-		{Key: "OP-2", Status: "In Progress"},
-		{Key: "OP-3", Status: "In Progress"},
+		{Key: "PROJ-1", Status: "In Progress"},
+		{Key: "PROJ-2", Status: "In Progress"},
+		{Key: "PROJ-3", Status: "In Progress"},
 	}
 	m.handleInProgress(inProgressMsg{issues: rows})
-	m.tabs[tabInProgress].table.SetCursor(1) // select OP-2
+	m.tabs[tabInProgress].table.SetCursor(1) // select PROJ-2
 
-	// Refresh with the list reordered; OP-2 is now last.
+	// Refresh with the list reordered; PROJ-2 is now last.
 	m.handleInProgress(inProgressMsg{issues: []jira.Issue{
-		{Key: "OP-3", Status: "In Progress"},
-		{Key: "OP-1", Status: "In Progress"},
-		{Key: "OP-2", Status: "In Progress"},
+		{Key: "PROJ-3", Status: "In Progress"},
+		{Key: "PROJ-1", Status: "In Progress"},
+		{Key: "PROJ-2", Status: "In Progress"},
 	}})
-	assert.Equal(t, "OP-2", m.selectedKeyOf(tabInProgress), "cursor should follow the selected key")
+	assert.Equal(t, "PROJ-2", m.selectedKeyOf(tabInProgress), "cursor should follow the selected key")
 }
 
 func TestModelFollowsSelectionAcrossTabs(t *testing.T) {
 	m := testModel()
-	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "PROJ-1", Status: "In Progress"}}})
 	require.Equal(t, tabInProgress, m.active)
-	require.Equal(t, "OP-1", m.selectedKeyOf(tabInProgress))
+	require.Equal(t, "PROJ-1", m.selectedKeyOf(tabInProgress))
 
-	// Refresh: OP-1 gets resolved → leaves in-progress, lands in closed. The
+	// Refresh: PROJ-1 gets resolved → leaves in-progress, lands in closed. The
 	// active view should follow it across the independently-arriving sections.
 	m.markAllLoading()
 	m.handleInProgress(inProgressMsg{issues: nil})
-	m.handleDone(doneMsg{issues: []jira.Issue{{Key: "OP-1", Status: "Done"}}})
+	m.handleDone(doneMsg{issues: []jira.Issue{{Key: "PROJ-1", Status: "Done"}}})
 	assert.Equal(t, tabClosed, m.active)
-	assert.Equal(t, "OP-1", m.selectedKeyOf(tabClosed))
+	assert.Equal(t, "PROJ-1", m.selectedKeyOf(tabClosed))
 }
 
 func TestModelEpicsChainAfterInProgress(t *testing.T) {
@@ -156,7 +156,7 @@ func TestModelEpicsChainAfterInProgress(t *testing.T) {
 	m := New(cfg, mock)
 
 	// In-progress lands first; its tab is ready while epics is still loading.
-	cmd := m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Parent: "EPIC-1", Status: "In Progress"}}})
+	cmd := m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "PROJ-1", Parent: "EPIC-1", Status: "In Progress"}}})
 	assert.False(t, m.tabs[tabInProgress].loading, "in-progress ready immediately")
 	assert.True(t, m.tabs[tabEpics].loading, "epics still loading until its fetch returns")
 	require.NotNil(t, cmd, "in-progress handler chains the epics fetch")
@@ -174,16 +174,16 @@ func TestModelEpicsChainAfterInProgress(t *testing.T) {
 }
 
 func TestModelEpicsRemovedFromInProgress(t *testing.T) {
-	// OP-288 is in progress AND an ancestor of OP-294; it must end up only in the
+	// PROJ-288 is in progress AND an ancestor of PROJ-294; it must end up only in the
 	// Epics tab, not duplicated in In progress.
 	mock := jira.NewMockClient()
-	mock.EpicIssues = []jira.Issue{{Key: "OP-288", Type: "Initiative"}}
+	mock.EpicIssues = []jira.Issue{{Key: "PROJ-288", Type: "Initiative"}}
 	cfg := &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4}
 	m := New(cfg, mock)
 
 	cmd := m.handleInProgress(inProgressMsg{issues: []jira.Issue{
-		{Key: "OP-294", Parent: "OP-288", Status: "In Progress"},
-		{Key: "OP-288", Type: "Initiative", Status: "In Progress"},
+		{Key: "PROJ-294", Parent: "PROJ-288", Status: "In Progress"},
+		{Key: "PROJ-288", Type: "Initiative", Status: "In Progress"},
 	}})
 	require.NotNil(t, cmd)
 	// Before epics land, the epic still shows in In progress.
@@ -194,9 +194,9 @@ func TestModelEpicsRemovedFromInProgress(t *testing.T) {
 	m = feed(m, em)
 
 	ipKeys := keySet(m.tabs[tabInProgress].rows)
-	assert.False(t, ipKeys["OP-288"], "epic must leave In progress")
-	assert.True(t, ipKeys["OP-294"], "non-epic child stays in In progress")
-	assert.True(t, keySet(m.tabs[tabEpics].rows)["OP-288"], "epic shows in Epics")
+	assert.False(t, ipKeys["PROJ-288"], "epic must leave In progress")
+	assert.True(t, ipKeys["PROJ-294"], "non-epic child stays in In progress")
+	assert.True(t, keySet(m.tabs[tabEpics].rows)["PROJ-288"], "epic shows in Epics")
 }
 
 func TestModelPaletteUsageCommand(t *testing.T) {
@@ -237,14 +237,14 @@ func TestModelMoveToDoneConfirmed(t *testing.T) {
 	mock := jira.NewMockClient()
 	cfg := &config.Config{DoneWindow: 24 * time.Hour, Weeks: 4}
 	m := New(cfg, mock)
-	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "PROJ-1", Status: "In Progress"}}})
 
 	// d prompts; view shows the confirmation.
 	updated, _, handled := m.handleKey("d")
 	m = updated.(*Model)
 	require.True(t, handled)
 	require.True(t, m.confirmDone)
-	assert.Contains(t, m.View(), "Move OP-1 to Done?")
+	assert.Contains(t, m.View(), "Move PROJ-1 to Done?")
 
 	// "y" confirms and fires the transition command.
 	updated, cmd, _ := m.handleKey("y")
@@ -254,15 +254,15 @@ func TestModelMoveToDoneConfirmed(t *testing.T) {
 	msg := cmd()
 	// Batch returns a slice of messages; find the transitionMsg.
 	tmsg := extractTransition(t, msg)
-	assert.Equal(t, "OP-1", tmsg.key)
+	assert.Equal(t, "PROJ-1", tmsg.key)
 	assert.Nil(t, tmsg.err)
 	require.Len(t, mock.Transitions, 1)
-	assert.Equal(t, [2]string{"OP-1", "Done"}, mock.Transitions[0])
+	assert.Equal(t, [2]string{"PROJ-1", "Done"}, mock.Transitions[0])
 }
 
 func TestModelMoveToDoneCancelled(t *testing.T) {
 	m := testModel()
-	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "OP-1", Status: "In Progress"}}})
+	m.handleInProgress(inProgressMsg{issues: []jira.Issue{{Key: "PROJ-1", Status: "In Progress"}}})
 	updated, _, _ := m.handleKey("d")
 	m = updated.(*Model)
 	require.True(t, m.confirmDone)
@@ -340,12 +340,12 @@ func TestRenderColoredTableEmbedsAnsiAndStaysIntact(t *testing.T) {
 	m = updated.(*Model)
 	now := time.Now()
 	m.handleInProgress(inProgressMsg{issues: []jira.Issue{
-		{Key: "OP-1", Summary: "fix", Status: "In Progress", Updated: now.Add(-2 * time.Hour)},
+		{Key: "PROJ-1", Summary: "fix", Status: "In Progress", Updated: now.Add(-2 * time.Hour)},
 	}})
 	out := m.renderColoredTable(tabInProgress)
 	assert.Contains(t, out, "\x1b[", "rows should carry ANSI colour")
 	// The key text must survive intact (no mid-escape truncation corruption).
-	assert.Contains(t, out, "OP-1")
+	assert.Contains(t, out, "PROJ-1")
 }
 
 func TestModelScrollWindowFollowsCursor(t *testing.T) {

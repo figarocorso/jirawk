@@ -32,7 +32,7 @@ func (s *Server) toolDefinitions() []toolDef {
 			Description: "Fetch full detail (status, type, priority, assignee, labels, URL) for a single issue by key.",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"key": map[string]any{"type": "string", "description": "issue key, e.g. OP-649"}},
+				"properties": map[string]any{"key": map[string]any{"type": "string", "description": "issue key, e.g. PROJ-649"}},
 				"required":   []string{"key"},
 			},
 		},

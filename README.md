@@ -97,7 +97,7 @@ jirawk list --section done          # only recently-closed issues (last 30d)
 jirawk list --json                  # JSON object (agent-friendly)
 jirawk stats                        # in-progress count + weekly closed chart
 jirawk stats --weeks 12             # change the look-back window
-jirawk get OP-649                   # single-issue detail
+jirawk get PROJ-649                   # single-issue detail
 jirawk check                        # environment / auth check
 jirawk version
 ```

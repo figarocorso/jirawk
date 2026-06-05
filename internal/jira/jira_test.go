@@ -2,6 +2,7 @@ package jira
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -48,13 +49,13 @@ func TestJQLBuilders(t *testing.T) {
 }
 
 func TestBrowseURL(t *testing.T) {
-	assert.Equal(t, "https://x.atlassian.net/browse/OP-1", BrowseURL("https://x.atlassian.net", "OP-1"))
-	assert.Equal(t, "https://x.atlassian.net/browse/OP-1", BrowseURL("https://x.atlassian.net/", "OP-1"))
-	assert.Equal(t, "OP-1", BrowseURL("", "OP-1"))
+	assert.Equal(t, "https://x.atlassian.net/browse/PROJ-1", BrowseURL("https://x.atlassian.net", "PROJ-1"))
+	assert.Equal(t, "https://x.atlassian.net/browse/PROJ-1", BrowseURL("https://x.atlassian.net/", "PROJ-1"))
+	assert.Equal(t, "PROJ-1", BrowseURL("", "PROJ-1"))
 }
 
 const sampleJSON = `[
-  {"key":"OP-1","fields":{
+  {"key":"PROJ-1","fields":{
     "summary":"first","labels":["a","b"],
     "issueType":{"name":"Task"},
     "assignee":{"displayName":"Mig"},
@@ -62,7 +63,7 @@ const sampleJSON = `[
     "status":{"name":"In Progress"},
     "created":"2026-06-01T10:00:00.000-0700",
     "updated":"2026-06-02T11:00:00.000-0700"}},
-  {"key":"OP-2","fields":{
+  {"key":"PROJ-2","fields":{
     "summary":"second","assignee":null,"priority":null,
     "status":{"name":"Resolved"}}}
 ]`
@@ -87,14 +88,14 @@ func TestParseAndInProgress(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, issues, 2)
 
-	assert.Equal(t, "OP-1", issues[0].Key)
+	assert.Equal(t, "PROJ-1", issues[0].Key)
 	assert.Equal(t, "first", issues[0].Summary)
 	assert.Equal(t, "Task", issues[0].Type)
 	assert.Equal(t, "Mig", issues[0].Assignee)
 	assert.Equal(t, "High", issues[0].Priority)
 	assert.Equal(t, "in progress", issues[0].Category)
 	assert.Equal(t, []string{"a", "b"}, issues[0].Labels)
-	assert.Equal(t, "https://x.atlassian.net/browse/OP-1", issues[0].URL)
+	assert.Equal(t, "https://x.atlassian.net/browse/PROJ-1", issues[0].URL)
 	assert.False(t, issues[0].Updated.IsZero())
 
 	// nil assignee/priority must not panic and stay empty.
@@ -138,7 +139,7 @@ func TestWeeklyDoneRunsPerBucket(t *testing.T) {
 }
 
 func TestCLIAncestorsWalksTwoLevels(t *testing.T) {
-	// Two-level chain: story OP-1 → epic EPIC-1 → initiative INIT-1. The runner
+	// Two-level chain: story PROJ-1 → epic EPIC-1 → initiative INIT-1. The runner
 	// answers each `key IN (...)` batch by the keys requested.
 	var queries []string
 	c := NewCLIClient(WithRunner(func(_ context.Context, args ...string) ([]byte, error) {
@@ -158,7 +159,7 @@ func TestCLIAncestorsWalksTwoLevels(t *testing.T) {
 		return []byte(`[]`), nil
 	}))
 
-	seeds := []Issue{{Key: "OP-1", Parent: "EPIC-1"}}
+	seeds := []Issue{{Key: "PROJ-1", Parent: "EPIC-1"}}
 	anc, err := c.Ancestors(context.Background(), seeds, 2)
 	require.NoError(t, err)
 	require.Len(t, anc, 2)
@@ -177,7 +178,7 @@ func TestCLIAncestorsDedupesAndStopsAtDepth(t *testing.T) {
 		// Every parent resolves to the same epic, which itself has no parent.
 		return []byte(`[{"key":"EPIC-1","fields":{"issueType":{"name":"Epic"},"status":{"name":"In Progress"}}}]`), nil
 	}))
-	seeds := []Issue{{Key: "OP-1", Parent: "EPIC-1"}, {Key: "OP-2", Parent: "EPIC-1"}}
+	seeds := []Issue{{Key: "PROJ-1", Parent: "EPIC-1"}, {Key: "PROJ-2", Parent: "EPIC-1"}}
 	anc, err := c.Ancestors(context.Background(), seeds, 2)
 	require.NoError(t, err)
 	// EPIC-1 appears once despite two seeds pointing at it; no parent → 1 query.
@@ -192,7 +193,7 @@ func TestMockAncestors(t *testing.T) {
 		{Key: "EPIC-1", Type: "Epic", Parent: "INIT-1"},
 		{Key: "INIT-1", Type: "Initiative"},
 	}
-	anc, err := m.Ancestors(context.Background(), []Issue{{Key: "OP-1", Parent: "EPIC-1"}}, 2)
+	anc, err := m.Ancestors(context.Background(), []Issue{{Key: "PROJ-1", Parent: "EPIC-1"}}, 2)
 	require.NoError(t, err)
 	require.Len(t, anc, 2)
 	assert.Equal(t, "EPIC-1", anc[0].Key)
@@ -233,4 +234,34 @@ func TestLabels(t *testing.T) {
 	assert.Equal(t, "in progress", StatusLabel(Issue{Status: "In Progress"}))
 	assert.True(t, IsDone(Issue{Category: "done"}))
 	assert.False(t, IsDone(Issue{Category: "in progress"}))
+}
+
+func TestParseAvailableStates(t *testing.T) {
+	msg := `jira: invalid transition state "Done"
+Available states for issue PROJ-15804: 'Blocked', 'Open', 'Reopen', 'Start Progress', 'Resolve', 'Close', 'Next', 'Review', 'Backlog'`
+	got := parseAvailableStates(msg)
+	assert.Equal(t, []string{"Blocked", "Open", "Reopen", "Start Progress", "Resolve", "Close", "Next", "Review", "Backlog"}, got)
+	assert.Nil(t, parseAvailableStates("some unrelated error"))
+}
+
+func TestPickDoneState(t *testing.T) {
+	states := []string{"Blocked", "Open", "Resolve", "Close"}
+	assert.Equal(t, "Resolve", pickDoneState(states, "Done"))
+	// Skips the state already tried.
+	assert.Equal(t, "Close", pickDoneState([]string{"Open", "Resolve", "Close"}, "Resolve"))
+	assert.Equal(t, "", pickDoneState([]string{"Open", "Backlog"}, "Done"))
+}
+
+func TestTransitionRetriesWithDiscoveredState(t *testing.T) {
+	var calls []string
+	c := NewCLIClient(WithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		state := args[len(args)-1]
+		calls = append(calls, state)
+		if state == "Done" {
+			return nil, errors.New("jira: invalid transition state \"Done\"\nAvailable states for issue PROJ-15804: 'Open', 'Resolve', 'Close'")
+		}
+		return nil, nil
+	}))
+	require.NoError(t, c.Transition(context.Background(), "PROJ-15804", "Done"))
+	assert.Equal(t, []string{"Done", "Resolve"}, calls)
 }

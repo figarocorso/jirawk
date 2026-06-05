@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -290,6 +291,12 @@ func (c *CLIClient) Get(ctx context.Context, key string) (Issue, error) {
 }
 
 // Transition moves an issue to the target state via `jira issue move`.
+//
+// Workflows vary wildly: a board may name its done step "Done", "Resolved",
+// "Resolve", "Close", etc. When the requested state is rejected, jira-cli
+// reports the valid transitions in its error. We parse that list and retry with
+// the first state whose name looks done-like, so the move succeeds on any board
+// without the caller having to know the exact transition name up front.
 func (c *CLIClient) Transition(ctx context.Context, key, state string) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -299,5 +306,59 @@ func (c *CLIClient) Transition(ctx context.Context, key, state string) error {
 		return fmt.Errorf("empty target state")
 	}
 	_, err := c.runner(ctx, "issue", "move", key, state)
+	if err == nil {
+		return nil
+	}
+	// Fall back to a done-like state discovered from the error, if any.
+	if alt := pickDoneState(parseAvailableStates(err.Error()), state); alt != "" {
+		if _, err2 := c.runner(ctx, "issue", "move", key, alt); err2 == nil {
+			return nil
+		}
+	}
 	return err
+}
+
+// availableStatesRe captures the comma-separated, single-quoted state list that
+// jira-cli prints after "Available states for issue <KEY>:".
+var availableStatesRe = regexp.MustCompile(`Available states[^:]*:\s*(.+)`)
+
+// parseAvailableStates extracts the valid transition names from a jira-cli
+// "invalid transition state" error message. Returns nil when none are present.
+func parseAvailableStates(msg string) []string {
+	m := availableStatesRe.FindStringSubmatch(msg)
+	if m == nil {
+		return nil
+	}
+	var states []string
+	for part := range strings.SplitSeq(m[1], ",") {
+		s := strings.TrimSpace(part)
+		s = strings.Trim(s, "'\"")
+		s = strings.TrimSpace(s)
+		if s != "" {
+			states = append(states, s)
+		}
+	}
+	return states
+}
+
+// doneKeywords are substrings (lowercased) that mark a transition as moving an
+// issue toward completion.
+var doneKeywords = []string{"done", "resolve", "close", "complete", "finish"}
+
+// pickDoneState returns the first state that looks done-like, skipping the state
+// already tried. Returns "" when nothing matches.
+func pickDoneState(states []string, tried string) string {
+	tried = strings.ToLower(strings.TrimSpace(tried))
+	for _, kw := range doneKeywords {
+		for _, s := range states {
+			low := strings.ToLower(s)
+			if low == tried {
+				continue
+			}
+			if strings.Contains(low, kw) {
+				return s
+			}
+		}
+	}
+	return ""
 }
