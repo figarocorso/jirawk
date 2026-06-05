@@ -128,6 +128,11 @@ type Model struct {
 	// issue migrates to another tab (e.g. resolved → Closed), the active view
 	// follows it there once that section's data lands.
 	followKey string
+
+	// inProgressSeeds is the full in-progress result (epics included), kept so
+	// the later epics step can classify seeds that are themselves epics. The
+	// In progress tab never displays these epics, so they don't flash in.
+	inProgressSeeds []jira.Issue
 }
 
 // doneState is the display name for the Done transition.
@@ -505,7 +510,10 @@ func (m *Model) handleInProgress(msg inProgressMsg) tea.Cmd {
 	}
 	m.err = ""
 	jira.SortByAgeOldestFirst(msg.issues)
-	m.applySection(tabInProgress, msg.issues)
+	m.inProgressSeeds = msg.issues
+	// Epics are surfaced in the Epics tab, not here; filter them out up front so
+	// they never appear in In progress and then vanish a moment later.
+	m.applySection(tabInProgress, nonEpics(msg.issues))
 	m.updateLoadStatus()
 	// Epics depend on the in-progress seeds; fetch them now that we have them.
 	return epicsCmd(m.client, msg.issues)
@@ -514,20 +522,30 @@ func (m *Model) handleInProgress(msg inProgressMsg) tea.Cmd {
 // handleEpics installs the epics rows and chains the open fetch (next tab).
 // msg.issues holds epics/initiatives discovered by walking the parent chain of
 // the in-progress seeds. A seed can also be an epic/initiative itself (Ancestors
-// classifies parents, never the seeds), so we fold those in too. Anything that
-// lands in Epics is dropped from In progress to avoid the duplicate.
+// classifies parents, never the seeds), so we fold those in too. The seeds are
+// already kept out of In progress (see handleInProgress), so no dedup is needed.
 func (m *Model) handleEpics(msg epicsMsg) tea.Cmd {
 	m.tabs[tabEpics].loading = false
 	if msg.err != nil {
 		m.err = msg.err.Error()
 	} else {
-		epics := mergeSelfEpics(msg.issues, m.tabs[tabInProgress].rows)
+		epics := mergeSelfEpics(msg.issues, m.inProgressSeeds)
 		jira.SortByUpdatedNewestFirst(epics)
 		m.applySection(tabEpics, epics)
-		m.applySection(tabInProgress, withoutKeys(m.tabs[tabInProgress].rows, keySet(epics)))
 	}
 	m.updateLoadStatus()
 	return openCmd(m.client)
+}
+
+// nonEpics returns the issues that are not epics/initiatives.
+func nonEpics(issues []jira.Issue) []jira.Issue {
+	out := make([]jira.Issue, 0, len(issues))
+	for _, i := range issues {
+		if !jira.IsEpicOrInitiative(i) {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // mergeSelfEpics appends in-progress seeds that are themselves epics/initiatives
@@ -551,17 +569,6 @@ func keySet(issues []jira.Issue) map[string]bool {
 		s[i.Key] = true
 	}
 	return s
-}
-
-// withoutKeys returns the issues whose key is not in exclude.
-func withoutKeys(issues []jira.Issue, exclude map[string]bool) []jira.Issue {
-	out := make([]jira.Issue, 0, len(issues))
-	for _, i := range issues {
-		if !exclude[i.Key] {
-			out = append(out, i)
-		}
-	}
-	return out
 }
 
 // handleOpen installs the open rows and chains the closed fetch (next tab).
